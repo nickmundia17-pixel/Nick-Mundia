@@ -38,6 +38,7 @@ import {
   type PersistentPlayerState,
 } from '../../types/discoverPlayer';
 import { LiveLyricsShower } from '../LiveLyricsShower';
+import { readJson } from '../../lib/readJson';
 
 interface DiscoverTabProps {
   user: User | null;
@@ -166,13 +167,13 @@ export function DiscoverTab({
     setArtistTracks([]);
     try {
       const res = await fetch(`/api/discover/search?q=${encodeURIComponent(q)}`);
-      const data = (await res.json()) as {
+      const data = await readJson<{
         tracks?: GlobalSearchTrack[];
         youtubeMatches?: YoutubeMatchItem[];
         soundcloudTracks?: GlobalSearchTrack[];
         soundcloudArtists?: SoundCloudArtistProfile[];
         error?: string;
-      };
+      }>(res);
       if (!res.ok) throw new Error(data.error || 'Global search failed');
       const tracks = data.tracks || [];
       setGlobalTracks(tracks);
@@ -200,7 +201,7 @@ export function DiscoverTab({
     setArtistTracks([]);
     try {
       const res = await fetch(`/api/discover/soundcloud-artist?id=${artist.id}`);
-      const data = (await res.json()) as { tracks?: GlobalSearchTrack[] };
+      const data = await readJson<{ tracks?: GlobalSearchTrack[] }>(res);
       setArtistTracks(data.tracks || []);
     } catch {
       setArtistTracks([]);
