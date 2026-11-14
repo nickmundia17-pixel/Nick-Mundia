@@ -60,7 +60,8 @@ export function AuthModal({
   const formatAuthError = (err: unknown): string => {
     const raw = err instanceof Error ? err.message : String(err);
     if (raw.includes('auth/operation-not-allowed')) {
-      return 'This sign-in provider is not enabled yet in your Firebase Console (Authentication > Sign-in method). Google Sign-In is enabled by default.';
+      const provider = authTab === 'phone' ? 'Phone' : authTab === 'email' ? 'Email/Password' : 'Google';
+      return `${provider} sign-in isn't switched on for this studio yet, so accounts can't be created this way. (Site owner: enable "${provider}" in Firebase Console > Authentication > Sign-in method.)`;
     }
     if (raw.includes('auth/unauthorized-domain')) {
       setAuthTab('email');
