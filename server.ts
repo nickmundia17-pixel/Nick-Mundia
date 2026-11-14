@@ -1369,4 +1369,9 @@ async function startServer() {
   });
 }
 
-startServer();
+// On Vercel the app is served by the api/index.ts serverless function instead of a long-lived listener.
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
