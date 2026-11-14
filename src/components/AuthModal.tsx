@@ -34,7 +34,7 @@ export function AuthModal({
   profile,
   onProfileSaved,
 }: AuthModalProps) {
-  const [authTab, setAuthTab] = useState<AuthTab>('google');
+  const [authTab, setAuthTab] = useState<AuthTab>('email');
   const [role, setRole] = useState<CreatorRole>(profile?.role || 'artist');
   const [displayName, setDisplayName] = useState(profile?.displayName || user?.displayName || '');
   const [buyMeSodaHandle, setBuyMeSodaHandle] = useState(profile?.buyMeSodaHandle || '');
@@ -63,7 +63,8 @@ export function AuthModal({
       return 'This sign-in provider is not enabled yet in your Firebase Console (Authentication > Sign-in method). Google Sign-In is enabled by default.';
     }
     if (raw.includes('auth/unauthorized-domain')) {
-      return 'This preview domain needs to be added to Firebase Console > Authentication > Settings > Authorized domains.';
+      setAuthTab('email');
+      return `Google and phone sign-in aren't enabled for ${window.location.hostname} yet. Use Email & Password below to register or sign in now. (Site owner: add "${window.location.hostname}" in Firebase Console > Authentication > Settings > Authorized domains.)`;
     }
     if (raw.includes('auth/popup-closed-by-user')) {
       return 'Sign-in popup was closed before completing authentication.';
