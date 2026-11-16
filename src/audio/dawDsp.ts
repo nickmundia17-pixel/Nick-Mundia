@@ -1,4 +1,5 @@
 // Offline & Real-Time AudioBuffer DSP Operations for the Wavacity-Style Multitrack DAW
+import { createTrackEffectChain, type TrackEffectsState } from './effectRackNodes';
 
 export function cloneAudioBuffer(ctx: BaseAudioContext, source: AudioBuffer): AudioBuffer {
   const copy = ctx.createBuffer(source.numberOfChannels, source.length, source.sampleRate);
@@ -326,6 +327,7 @@ export interface MixdownTrackInput {
   muted: boolean;
   solo: boolean;
   rate: number;
+  effects?: TrackEffectsState;
 }
 
 export async function mixdownMultitrackToBuffer(
@@ -336,11 +338,18 @@ export async function mixdownMultitrackToBuffer(
   const playable = tracks.filter((t) => t.buffer && !t.muted && (!anySolo || t.solo));
   if (playable.length === 0) return null;
 
+  const extraTail = playable.reduce((maxTail, t) => {
+    if (!t.effects || t.effects.bypassAll) return maxTail;
+    const revTail = t.effects.reverb.enabled ? Math.min(3.5, t.effects.reverb.decaySec * 0.85) : 0;
+    const delTail = t.effects.delay.enabled ? Math.min(2.0, t.effects.delay.timeSec * 3) : 0;
+    return Math.max(maxTail, revTail, delTail);
+  }, 0.25);
+
   const totalDur = Math.max(
     1,
     ...playable.map((t) => t.offsetSec + t.buffer!.duration / Math.max(0.25, t.rate))
   );
-  const offline = new OfflineAudioContext(2, Math.ceil((totalDur + 0.25) * sampleRate), sampleRate);
+  const offline = new OfflineAudioContext(2, Math.ceil((totalDur + extraTail) * sampleRate), sampleRate);
 
   playable.forEach((track) => {
     const src = offline.createBufferSource();
@@ -353,7 +362,16 @@ export async function mixdownMultitrackToBuffer(
     const panner = offline.createStereoPanner();
     panner.pan.value = Math.max(-1, Math.min(1, track.pan));
 
-    src.connect(gain).connect(panner).connect(offline.destination);
+    src.connect(gain).connect(panner);
+
+    if (track.effects && !track.effects.bypassAll) {
+      const fxChain = createTrackEffectChain(offline, track.effects);
+      panner.connect(fxChain.input);
+      fxChain.output.connect(offline.destination);
+    } else {
+      panner.connect(offline.destination);
+    }
+
     src.start(Math.max(0, track.offsetSec));
   });
 

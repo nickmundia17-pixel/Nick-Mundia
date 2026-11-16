@@ -14,26 +14,42 @@ import {
   type User,
 } from 'firebase/auth';
 import {
-  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   doc,
   getDoc,
   getDocFromServer,
   setDoc,
   addDoc,
+  updateDoc,
   deleteDoc,
+  writeBatch,
   collection,
   query,
   where,
   orderBy,
+  limit,
   onSnapshot,
   serverTimestamp,
   type Unsubscribe,
 } from 'firebase/firestore';
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = initializeFirestore(
+  app,
+  {
+    experimentalForceLongPolling: true,
+    localCache: persistentLocalCache({
+      tabManager: persistentMultipleTabManager(),
+    }),
+  },
+  firebaseConfig.firestoreDatabaseId
+);
 export const auth = getAuth(app);
+export const storage = getStorage(app);
 
 export enum OperationType {
   CREATE = 'create',
@@ -88,6 +104,9 @@ export function handleFirestoreError(
 }
 
 async function testConnection() {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
@@ -122,11 +141,16 @@ export interface SavedMusicProject {
   id: string;
   ownerId: string;
   title: string;
+  category?: 'beat' | 'recording' | 'song';
   genre: string;
   bpm: number;
+  musicalKey?: string;
+  timeSignature?: string;
   lyrics?: string;
   alignmentNotes?: string;
   kitName?: string;
+  studioStateJson?: string;
+  updatedAtMs?: number;
 }
 
 export interface SavedSocialCampaign {
@@ -179,7 +203,11 @@ export async function registerWithEmail(
   if (displayName.trim()) {
     await updateProfile(cred.user, { displayName: displayName.trim().slice(0, 80) });
   }
-  await sendEmailVerification(cred.user);
+  try {
+    await sendEmailVerification(cred.user);
+  } catch {
+    // Non-fatal: allow user to proceed even if verification email rate-limits
+  }
   return cred.user;
 }
 
@@ -189,6 +217,10 @@ export async function loginWithEmail(email: string, password: string): Promise<U
 }
 
 export function createPhoneRecaptcha(containerId: string): RecaptchaVerifier {
+  const el = document.getElementById(containerId);
+  if (el) {
+    el.innerHTML = '';
+  }
   return new RecaptchaVerifier(auth, containerId, { size: 'invisible' });
 }
 
@@ -313,34 +345,178 @@ export async function getPrivateInfo(uid: string): Promise<CreatorPrivateInfo | 
   }
 }
 
+export interface SocialSyncConfig {
+  autoPublishTracks: boolean;
+  autoPublishReels: boolean;
+  includeSodaCard: boolean;
+  instagramEnabled: boolean;
+  tiktokEnabled: boolean;
+  soundcloudEnabled: boolean;
+  facebookEnabled: boolean;
+  whatsappEnabled: boolean;
+  soundcloudHandle: string;
+}
+
+export const DEFAULT_SOCIAL_SYNC_CONFIG: SocialSyncConfig = {
+  autoPublishTracks: true,
+  autoPublishReels: true,
+  includeSodaCard: true,
+  instagramEnabled: true,
+  tiktokEnabled: true,
+  soundcloudEnabled: true,
+  facebookEnabled: false,
+  whatsappEnabled: false,
+  soundcloudHandle: '',
+};
+
+export async function upsertSocialSyncConfig(
+  uid: string,
+  config: SocialSyncConfig
+): Promise<void> {
+  const path = `users/${uid}/private/social_sync`;
+  const ref = doc(db, 'users', uid, 'private', 'social_sync');
+  try {
+    await setDoc(ref, {
+      uid,
+      autoPublishTracks: Boolean(config.autoPublishTracks),
+      autoPublishReels: Boolean(config.autoPublishReels),
+      includeSodaCard: Boolean(config.includeSodaCard),
+      instagramEnabled: Boolean(config.instagramEnabled),
+      tiktokEnabled: Boolean(config.tiktokEnabled),
+      soundcloudEnabled: Boolean(config.soundcloudEnabled),
+      facebookEnabled: Boolean(config.facebookEnabled),
+      whatsappEnabled: Boolean(config.whatsappEnabled),
+      soundcloudHandle: (config.soundcloudHandle || '').trim().slice(0, 80),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export function subscribeSocialSyncConfig(
+  uid: string,
+  onData: (config: SocialSyncConfig | null) => void
+): Unsubscribe {
+  const path = `users/${uid}/private/social_sync`;
+  const ref = doc(db, 'users', uid, 'private', 'social_sync');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null);
+        return;
+      }
+      const d = snap.data();
+      onData({
+        autoPublishTracks: Boolean(d.autoPublishTracks),
+        autoPublishReels: Boolean(d.autoPublishReels),
+        includeSodaCard: Boolean(d.includeSodaCard),
+        instagramEnabled: Boolean(d.instagramEnabled),
+        tiktokEnabled: Boolean(d.tiktokEnabled),
+        soundcloudEnabled: Boolean(d.soundcloudEnabled),
+        facebookEnabled: Boolean(d.facebookEnabled),
+        whatsappEnabled: Boolean(d.whatsappEnabled),
+        soundcloudHandle: typeof d.soundcloudHandle === 'string' ? d.soundcloudHandle : '',
+      });
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  );
+}
+
 export async function saveMusicProject(
   ownerId: string,
   payload: {
     title: string;
+    category?: 'beat' | 'recording' | 'song';
     genre: string;
     bpm: number;
+    musicalKey?: string;
+    timeSignature?: string;
     lyrics?: string;
     alignmentNotes?: string;
     kitName?: string;
+    studioStateJson?: string;
   }
 ): Promise<string> {
   const path = 'projects';
   try {
-    const docRef = await addDoc(collection(db, 'projects'), {
+    const docData: Record<string, unknown> = {
       ownerId,
       title: payload.title.trim().slice(0, 120) || 'Untitled Studio Session',
-      genre: payload.genre.trim().slice(0, 60) || 'Afrobeats',
+      category: payload.category || 'song',
+      genre: payload.genre.trim().slice(0, 60) || 'Afrobeat',
       bpm: Math.min(240, Math.max(40, Number(payload.bpm) || 112)),
+      musicalKey: (payload.musicalKey || 'A minor').slice(0, 32),
+      timeSignature: (payload.timeSignature || '4/4').slice(0, 16),
       lyrics: (payload.lyrics || '').slice(0, 8000),
       alignmentNotes: (payload.alignmentNotes || '').slice(0, 4000),
       kitName: (payload.kitName || '').slice(0, 60),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (payload.studioStateJson) {
+      docData.studioStateJson = payload.studioStateJson.slice(0, 120000);
+    }
+    const docRef = await addDoc(collection(db, 'projects'), docData);
     return docRef.id;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
+}
+
+export async function updateMusicProject(
+  projectId: string,
+  payload: Partial<{
+    title: string;
+    category: 'beat' | 'recording' | 'song';
+    genre: string;
+    bpm: number;
+    musicalKey: string;
+    timeSignature: string;
+    lyrics: string;
+    alignmentNotes: string;
+    kitName: string;
+    studioStateJson: string;
+  }>
+): Promise<void> {
+  const path = `projects/${projectId}`;
+  try {
+    const patch: Record<string, unknown> = { updatedAt: serverTimestamp() };
+    if (payload.title !== undefined) patch.title = payload.title.trim().slice(0, 120) || 'Untitled Project';
+    if (payload.category !== undefined) patch.category = payload.category;
+    if (payload.genre !== undefined) patch.genre = payload.genre.trim().slice(0, 60) || 'Afrobeat';
+    if (payload.bpm !== undefined) patch.bpm = Math.min(240, Math.max(40, Number(payload.bpm) || 112));
+    if (payload.musicalKey !== undefined) patch.musicalKey = payload.musicalKey.slice(0, 32);
+    if (payload.timeSignature !== undefined) patch.timeSignature = payload.timeSignature.slice(0, 16);
+    if (payload.lyrics !== undefined) patch.lyrics = payload.lyrics.slice(0, 8000);
+    if (payload.alignmentNotes !== undefined) patch.alignmentNotes = payload.alignmentNotes.slice(0, 4000);
+    if (payload.kitName !== undefined) patch.kitName = payload.kitName.slice(0, 60);
+    if (payload.studioStateJson !== undefined) patch.studioStateJson = payload.studioStateJson.slice(0, 120000);
+    await updateDoc(doc(db, 'projects', projectId), patch);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function duplicateMusicProject(
+  ownerId: string,
+  source: SavedMusicProject
+): Promise<string> {
+  return saveMusicProject(ownerId, {
+    title: `${source.title} (Copy)`.slice(0, 120),
+    category: source.category || 'song',
+    genre: source.genre,
+    bpm: source.bpm,
+    musicalKey: source.musicalKey || 'A minor',
+    timeSignature: source.timeSignature || '4/4',
+    lyrics: source.lyrics || '',
+    alignmentNotes: source.alignmentNotes || '',
+    kitName: source.kitName || '',
+    studioStateJson: source.studioStateJson,
+  });
 }
 
 export async function removeMusicProject(projectId: string): Promise<void> {
@@ -365,10 +541,14 @@ export function subscribeUserProjects(
   return onSnapshot(
     q,
     (snapshot) => {
-      const rows = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as Omit<SavedMusicProject, 'id'>),
-      }));
+      const rows = snapshot.docs.map((d) => {
+        const raw = d.data();
+        return {
+          id: d.id,
+          ...(raw as Omit<SavedMusicProject, 'id' | 'updatedAtMs'>),
+          updatedAtMs: raw.updatedAt?.toMillis?.() ?? Date.now(),
+        };
+      });
       onData(rows);
     },
     (error) => {
@@ -479,17 +659,25 @@ export function subscribeMySodaSupports(
 
 export function subscribePublicCreators(onData: (items: CreatorProfile[]) => void): Unsubscribe {
   const path = 'users';
-  const q = query(collection(db, 'users'), orderBy('updatedAt', 'desc'));
+  const q = query(
+    collection(db, 'users'),
+    where('role', 'in', ['artist', 'creator', 'dj']),
+    limit(50)
+  );
   return onSnapshot(
     q,
     (snapshot) => {
-      const rows = snapshot.docs.map((d) => ({
-        uid: d.id,
-        displayName: d.data().displayName,
-        role: d.data().role,
-        buyMeSodaHandle: d.data().buyMeSodaHandle,
-        bio: d.data().bio,
-      }));
+      const rows = snapshot.docs
+        .map((d) => ({
+          uid: d.id,
+          displayName: d.data().displayName,
+          role: d.data().role,
+          buyMeSodaHandle: d.data().buyMeSodaHandle,
+          bio: d.data().bio,
+          _updatedMs: d.data().updatedAt?.toMillis?.() ?? 0,
+        }))
+        .sort((a, b) => b._updatedMs - a._updatedMs)
+        .map(({ _updatedMs: _ignored, ...profile }) => profile);
       onData(rows);
     },
     (error) => {
@@ -568,3 +756,516 @@ export function subscribeUserPadAssignments(
     }
   );
 }
+
+export type CommunityActivityType = 'interaction' | 'shared_track' | 'milestone';
+
+export interface CommunityActivityRecord {
+  id: string;
+  authorId: string;
+  authorName: string;
+  authorRole: 'artist' | 'creator' | 'dj' | 'listener';
+  activityType: CommunityActivityType;
+  title: string;
+  detail: string;
+  trackTitle?: string;
+  bpm?: number;
+  grooveStyle?: 'afro' | 'house' | 'trap';
+  milestoneTag?: string;
+  platform?: string;
+  likesCount: number;
+  commentsCount: number;
+  isPublic: boolean;
+  createdAtMs: number;
+}
+
+export interface CommunityActivityCommentRecord {
+  id: string;
+  activityId: string;
+  authorId: string;
+  authorName: string;
+  text: string;
+  createdAtMs: number;
+}
+
+export async function publishCommunityActivity(
+  authorId: string,
+  payload: {
+    authorName: string;
+    authorRole?: 'artist' | 'creator' | 'dj' | 'listener';
+    activityType: CommunityActivityType;
+    title: string;
+    detail: string;
+    trackTitle?: string;
+    bpm?: number;
+    grooveStyle?: 'afro' | 'house' | 'trap';
+    milestoneTag?: string;
+    platform?: string;
+  }
+): Promise<string> {
+  const path = 'community_activities';
+  try {
+    const docData: Record<string, unknown> = {
+      authorId,
+      authorName: payload.authorName.trim().slice(0, 80) || 'Studio Creator',
+      authorRole: payload.authorRole || 'creator',
+      activityType: payload.activityType,
+      title: payload.title.trim().slice(0, 140) || 'Studio Update',
+      detail: payload.detail.trim().slice(0, 600) || 'Shared in SoundDeck Studio.',
+      likesCount: 0,
+      commentsCount: 0,
+      isPublic: true,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    if (payload.trackTitle && payload.trackTitle.trim()) {
+      docData.trackTitle = payload.trackTitle.trim().slice(0, 120);
+    }
+    if (typeof payload.bpm === 'number' && Number.isFinite(payload.bpm)) {
+      docData.bpm = Math.min(240, Math.max(40, Math.round(payload.bpm)));
+    }
+    if (payload.grooveStyle) {
+      docData.grooveStyle = payload.grooveStyle;
+    }
+    if (payload.milestoneTag && payload.milestoneTag.trim()) {
+      docData.milestoneTag = payload.milestoneTag.trim().slice(0, 60);
+    }
+    if (payload.platform && payload.platform.trim()) {
+      docData.platform = payload.platform.trim().slice(0, 30);
+    }
+
+    const ref = await addDoc(collection(db, 'community_activities'), docData);
+    return ref.id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export function subscribeCommunityActivities(
+  onData: (items: CommunityActivityRecord[]) => void
+): Unsubscribe {
+  const path = 'community_activities';
+  const q = query(
+    collection(db, 'community_activities'),
+    where('isPublic', '==', true),
+    limit(40)
+  );
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const rows: CommunityActivityRecord[] = snapshot.docs
+        .map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            authorId: String(data.authorId || ''),
+            authorName: String(data.authorName || 'Creator'),
+            authorRole: (data.authorRole as CommunityActivityRecord['authorRole']) || 'creator',
+            activityType: (data.activityType as CommunityActivityType) || 'interaction',
+            title: String(data.title || ''),
+            detail: String(data.detail || ''),
+            trackTitle: typeof data.trackTitle === 'string' ? data.trackTitle : undefined,
+            bpm: typeof data.bpm === 'number' ? data.bpm : undefined,
+            grooveStyle:
+              data.grooveStyle === 'afro' || data.grooveStyle === 'house' || data.grooveStyle === 'trap'
+                ? data.grooveStyle
+                : undefined,
+            milestoneTag: typeof data.milestoneTag === 'string' ? data.milestoneTag : undefined,
+            platform: typeof data.platform === 'string' ? data.platform : undefined,
+            likesCount: typeof data.likesCount === 'number' ? data.likesCount : 0,
+            commentsCount: typeof data.commentsCount === 'number' ? data.commentsCount : 0,
+            isPublic: Boolean(data.isPublic),
+            createdAtMs: data.createdAt?.toMillis?.() ?? Date.now(),
+          };
+        })
+        .sort((a, b) => b.createdAtMs - a.createdAtMs);
+      onData(rows);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+export async function updateCommunityActivityLikes(
+  activityId: string,
+  nextLikesCount: number
+): Promise<void> {
+  const path = `community_activities/${activityId}`;
+  try {
+    await updateDoc(doc(db, 'community_activities', activityId), {
+      likesCount: Math.max(0, Math.min(1000000, Math.round(nextLikesCount))),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function addCommunityActivityComment(
+  activityId: string,
+  payload: {
+    authorId: string;
+    authorName: string;
+    text: string;
+    currentCommentsCount: number;
+  }
+): Promise<void> {
+  const path = `community_activities/${activityId}/comments`;
+  try {
+    const batch = writeBatch(db);
+    const commentRef = doc(collection(db, 'community_activities', activityId, 'comments'));
+    const activityRef = doc(db, 'community_activities', activityId);
+
+    batch.set(commentRef, {
+      activityId,
+      authorId: payload.authorId,
+      authorName: payload.authorName.trim().slice(0, 80) || 'Community Member',
+      text: payload.text.trim().slice(0, 400),
+      isPublic: true,
+      createdAt: serverTimestamp(),
+    });
+
+    batch.update(activityRef, {
+      commentsCount: Math.max(0, Math.min(100000, payload.currentCommentsCount + 1)),
+      updatedAt: serverTimestamp(),
+    });
+
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export function subscribeCommunityActivityComments(
+  activityId: string,
+  onData: (items: CommunityActivityCommentRecord[]) => void
+): Unsubscribe {
+  const path = `community_activities/${activityId}/comments`;
+  const q = query(
+    collection(db, 'community_activities', activityId, 'comments'),
+    where('isPublic', '==', true),
+    limit(30)
+  );
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const rows: CommunityActivityCommentRecord[] = snapshot.docs
+        .map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            activityId: String(data.activityId || activityId),
+            authorId: String(data.authorId || ''),
+            authorName: String(data.authorName || 'Member'),
+            text: String(data.text || ''),
+            createdAtMs: data.createdAt?.toMillis?.() ?? Date.now(),
+          };
+        })
+        .sort((a, b) => a.createdAtMs - b.createdAtMs);
+      onData(rows);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+// =========================================================================
+// Firebase Storage Audio Upload + Pro Vocal Presets, Collaborations & Export Logs
+// =========================================================================
+
+export async function uploadStudioAudioBlob(
+  ownerId: string,
+  fileName: string,
+  blob: Blob
+): Promise<{ downloadUrl: string; storagePath: string } | null> {
+  try {
+    const cleanName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+    const path = `studio_audio/${ownerId}/${Date.now()}_${cleanName}`;
+    const fileRef = storageRef(storage, path);
+    await uploadBytes(fileRef, blob, { contentType: blob.type || 'audio/wav' });
+    const downloadUrl = await getDownloadURL(fileRef);
+    return { downloadUrl, storagePath: path };
+  } catch (err) {
+    console.warn('Cloud Storage upload skipped/unavailable:', err);
+    return null;
+  }
+}
+
+export interface SavedVocalPresetRecord {
+  id: string;
+  ownerId: string;
+  name: string;
+  description?: string;
+  presetJson: string;
+}
+
+export async function saveVocalPreset(
+  ownerId: string,
+  payload: { name: string; description?: string; presetJson: string }
+): Promise<string> {
+  const path = 'vocal_presets';
+  try {
+    const docRef = await addDoc(collection(db, 'vocal_presets'), {
+      ownerId,
+      name: payload.name.trim().slice(0, 80) || 'Custom Vocal Chain',
+      description: (payload.description || '').trim().slice(0, 240),
+      presetJson: payload.presetJson.slice(0, 8000),
+      createdAt: serverTimestamp(),
+    });
+    return docRef.id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function removeVocalPreset(presetId: string): Promise<void> {
+  const path = `vocal_presets/${presetId}`;
+  try {
+    await deleteDoc(doc(db, 'vocal_presets', presetId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export function subscribeUserVocalPresets(
+  ownerId: string,
+  onData: (items: SavedVocalPresetRecord[]) => void
+): Unsubscribe {
+  const path = 'vocal_presets';
+  const q = query(
+    collection(db, 'vocal_presets'),
+    where('ownerId', '==', ownerId),
+    limit(30)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      onData(
+        snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<SavedVocalPresetRecord, 'id'>),
+        }))
+      );
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+export interface StudioCollaborationRecord {
+  id: string;
+  ownerId: string;
+  projectTitle: string;
+  bpm: number;
+  musicalKey?: string;
+  collaboratorEmails: string[];
+  stateJson: string;
+  updatedAtMs: number;
+}
+
+export async function saveOrUpdateCollaborationRoom(
+  ownerId: string,
+  payload: {
+    collabId?: string;
+    projectTitle: string;
+    bpm: number;
+    musicalKey?: string;
+    collaboratorEmails: string[];
+    stateJson: string;
+  }
+): Promise<string> {
+  const cleanEmails = Array.from(
+    new Set(payload.collaboratorEmails.map((e) => e.trim().toLowerCase()).filter(Boolean))
+  ).slice(0, 12);
+
+  if (payload.collabId) {
+    const path = `studio_collaborations/${payload.collabId}`;
+    try {
+      await updateDoc(doc(db, 'studio_collaborations', payload.collabId), {
+        projectTitle: payload.projectTitle.trim().slice(0, 120) || 'Shared Studio Room',
+        bpm: Math.min(240, Math.max(40, Number(payload.bpm) || 112)),
+        musicalKey: (payload.musicalKey || 'A minor').slice(0, 32),
+        collaboratorEmails: cleanEmails,
+        stateJson: payload.stateJson.slice(0, 60000),
+        updatedAt: serverTimestamp(),
+      });
+      return payload.collabId;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  } else {
+    const path = 'studio_collaborations';
+    try {
+      const ref = await addDoc(collection(db, 'studio_collaborations'), {
+        ownerId,
+        projectTitle: payload.projectTitle.trim().slice(0, 120) || 'Shared Studio Room',
+        bpm: Math.min(240, Math.max(40, Number(payload.bpm) || 112)),
+        musicalKey: (payload.musicalKey || 'A minor').slice(0, 32),
+        collaboratorEmails: cleanEmails,
+        stateJson: payload.stateJson.slice(0, 60000),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      return ref.id;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  }
+}
+
+export function subscribeOwnedCollaborations(
+  ownerId: string,
+  onData: (items: StudioCollaborationRecord[]) => void
+): Unsubscribe {
+  const path = 'studio_collaborations';
+  const q = query(
+    collection(db, 'studio_collaborations'),
+    where('ownerId', '==', ownerId),
+    limit(20)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      onData(
+        snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            ownerId: String(data.ownerId || ''),
+            projectTitle: String(data.projectTitle || ''),
+            bpm: Number(data.bpm || 112),
+            musicalKey: typeof data.musicalKey === 'string' ? data.musicalKey : 'A minor',
+            collaboratorEmails: Array.isArray(data.collaboratorEmails) ? data.collaboratorEmails : [],
+            stateJson: String(data.stateJson || '{}'),
+            updatedAtMs: data.updatedAt?.toMillis?.() ?? Date.now(),
+          };
+        })
+      );
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+export function subscribeInvitedCollaborations(
+  email: string,
+  onData: (items: StudioCollaborationRecord[]) => void
+): Unsubscribe {
+  const path = 'studio_collaborations';
+  const cleanEmail = email.trim().toLowerCase();
+  const q = query(
+    collection(db, 'studio_collaborations'),
+    where('collaboratorEmails', 'array-contains', cleanEmail),
+    limit(20)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      onData(
+        snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            ownerId: String(data.ownerId || ''),
+            projectTitle: String(data.projectTitle || ''),
+            bpm: Number(data.bpm || 112),
+            musicalKey: typeof data.musicalKey === 'string' ? data.musicalKey : 'A minor',
+            collaboratorEmails: Array.isArray(data.collaboratorEmails) ? data.collaboratorEmails : [],
+            stateJson: String(data.stateJson || '{}'),
+            updatedAtMs: data.updatedAt?.toMillis?.() ?? Date.now(),
+          };
+        })
+      );
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+export interface StudioExportLogRecord {
+  id: string;
+  ownerId: string;
+  projectTitle: string;
+  fileName: string;
+  format: 'wav' | 'mp3' | 'stems' | 'backup_json';
+  sampleRate: number;
+  bitDepth?: number;
+  sizeBytes: number;
+  createdAtMs: number;
+}
+
+export async function logStudioExport(
+  ownerId: string,
+  payload: {
+    projectTitle: string;
+    fileName: string;
+    format: 'wav' | 'mp3' | 'stems' | 'backup_json';
+    sampleRate: number;
+    bitDepth?: number;
+    sizeBytes: number;
+  }
+): Promise<void> {
+  const path = 'export_logs';
+  try {
+    const docData: Record<string, unknown> = {
+      ownerId,
+      projectTitle: payload.projectTitle.trim().slice(0, 120) || 'Studio Project',
+      fileName: payload.fileName.trim().slice(0, 160) || 'export',
+      format: payload.format,
+      sampleRate: Math.round(payload.sampleRate),
+      sizeBytes: Math.max(0, Math.round(payload.sizeBytes)),
+      createdAt: serverTimestamp(),
+    };
+    if (payload.bitDepth) {
+      docData.bitDepth = Math.round(payload.bitDepth);
+    }
+    await addDoc(collection(db, 'export_logs'), docData);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export function subscribeUserExportLogs(
+  ownerId: string,
+  onData: (items: StudioExportLogRecord[]) => void
+): Unsubscribe {
+  const path = 'export_logs';
+  const q = query(
+    collection(db, 'export_logs'),
+    where('ownerId', '==', ownerId),
+    limit(25)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      onData(
+        snap.docs
+          .map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              ownerId: String(data.ownerId || ''),
+              projectTitle: String(data.projectTitle || ''),
+              fileName: String(data.fileName || ''),
+              format: (data.format as StudioExportLogRecord['format']) || 'wav',
+              sampleRate: Number(data.sampleRate || 44100),
+              bitDepth: typeof data.bitDepth === 'number' ? data.bitDepth : undefined,
+              sizeBytes: Number(data.sizeBytes || 0),
+              createdAtMs: data.createdAt?.toMillis?.() ?? Date.now(),
+            };
+          })
+          .sort((a, b) => b.createdAtMs - a.createdAtMs)
+      );
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+

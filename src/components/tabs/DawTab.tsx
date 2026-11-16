@@ -69,6 +69,16 @@ import {
   type VocalPolishOptions,
 } from '../../audio/dawDsp';
 
+import { DawEffectRack } from './DawEffectRack';
+import {
+  createDefaultTrackEffects,
+  createTrackEffectChain,
+  updateTrackEffectChain,
+  bakeEffectRackIntoBuffer,
+  type TrackEffectsState,
+  type TrackEffectChainInstance,
+} from '../../audio/effectRackNodes';
+
 interface DawTabProps {
   initialBpm?: number;
   initialBeatSignature?: BeatSignature;
@@ -85,6 +95,17 @@ interface DawTrack {
   solo: boolean;
   rate: number; // 0.6..1.6
   viewMode: 'waveform' | 'spectrogram';
+  effects: TrackEffectsState;
+}
+
+function cloneTrackEffects(fx?: TrackEffectsState): TrackEffectsState {
+  if (!fx) return createDefaultTrackEffects();
+  return {
+    bypassAll: fx.bypassAll,
+    compressor: { ...fx.compressor },
+    delay: { ...fx.delay },
+    reverb: { ...fx.reverb },
+  };
 }
 
 type ToolMode = 'select' | 'shift' | 'zoom';
@@ -133,6 +154,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
       solo: false,
       rate: 1.0,
       viewMode: 'waveform',
+      effects: createDefaultTrackEffects(),
     },
     {
       id: 'trk_2',
@@ -145,6 +167,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
       solo: false,
       rate: 1.0,
       viewMode: 'waveform',
+      effects: createDefaultTrackEffects(),
     },
   ]);
   const [selectedTrackId, setSelectedTrackId] = useState<string>('trk_1');
@@ -175,6 +198,9 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
   const [renderingWav, setRenderingWav] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showLiveVisualizer, setShowLiveVisualizer] = useState(true);
+  const [showEffectRack, setShowEffectRack] = useState(true);
+  const [compReductionDb, setCompReductionDb] = useState<number>(0);
+  const [bakingEffects, setBakingEffects] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportFormat, setExportFormat] = useState<'wav' | 'mp3'>('wav');
   const [includeMetronome, setIncludeMetronome] = useState(false);
@@ -211,6 +237,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
 
   // Refs for real-time playback, drag tracking, and file picking
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const activeEffectChainsRef = useRef<Record<string, TrackEffectChainInstance>>({});
   const playbackTimerRef = useRef<number | null>(null);
   const playStartWallRef = useRef<number>(0);
   const playOffsetRef = useRef<number>(0);
@@ -222,6 +249,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
   const targetUploadTrackRef = useRef<string>('trk_1');
   const menuContainerRef = useRef<HTMLDivElement | null>(null);
   const timelineWrapRef = useRef<HTMLDivElement | null>(null);
+  const effectRackRef = useRef<HTMLDivElement | null>(null);
   const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
 
   // Pointer drag tracking on timeline
@@ -257,6 +285,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
       const cloned = currentTracks.map((t) => ({
         ...t,
         buffer: t.buffer ? cloneAudioBuffer(ctx, t.buffer) : null,
+        effects: cloneTrackEffects(t.effects),
       }));
       setUndoStack((prev) => [...prev.slice(-19), { tracks: cloned, selectedTrackId: currentSelectedId }]);
       setRedoStack([]);
@@ -291,10 +320,15 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
       }
     });
     activeSourcesRef.current = [];
+    Object.values(activeEffectChainsRef.current).forEach((chain) => {
+      chain.disconnect();
+    });
+    activeEffectChainsRef.current = {};
     setIsPlaying(false);
     setIsPaused(false);
     setMeterLevelPct(0);
     setMeterPeakDb(-60);
+    setCompReductionDb(0);
     if (resetCursor) {
       setPlayheadSec(selectionStart);
     }
@@ -308,7 +342,19 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
     };
   }, [stopPlayback]);
 
-  // Live L/R Output dB Meter loop while playing
+  // Real-time Effect Rack parameter modulation during playback
+  useEffect(() => {
+    if (!isPlaying) return;
+    const ctx = getAudioContext();
+    tracks.forEach((track) => {
+      const chain = activeEffectChainsRef.current[track.id];
+      if (chain) {
+        updateTrackEffectChain(ctx, chain, track.effects);
+      }
+    });
+  }, [tracks, isPlaying]);
+
+  // Live L/R Output dB Meter & Compressor Gain Reduction loop while playing
   useEffect(() => {
     if (!isPlaying) return;
     let rafId = 0;
@@ -327,11 +373,17 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
         setMeterLevelPct(pct);
         setMeterPeakDb(db);
       }
+      const activeChain = activeEffectChainsRef.current[selectedTrackId];
+      if (activeChain) {
+        setCompReductionDb(activeChain.compressorNode.reduction || 0);
+      } else {
+        setCompReductionDb(0);
+      }
       rafId = requestAnimationFrame(updateMeter);
     };
     rafId = requestAnimationFrame(updateMeter);
     return () => cancelAnimationFrame(rafId);
-  }, [isPlaying]);
+  }, [isPlaying, selectedTrackId]);
 
   // Render waveforms & spectrograms per track
   useEffect(() => {
@@ -519,6 +571,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
       const shouldLoop = (forceLoop || loopSelection) && hasSelection;
 
       const sources: AudioBufferSourceNode[] = [];
+      const effectChains: Record<string, TrackEffectChainInstance> = {};
       const baseAudioTime = ctx.currentTime + 0.03;
 
       playable.forEach((track) => {
@@ -538,7 +591,13 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
         const panNode = ctx.createStereoPanner();
         panNode.pan.value = Math.max(-1, Math.min(1, track.pan));
 
-        src.connect(gainNode).connect(panNode).connect(dawAnalyserRef.current!);
+        const chain = createTrackEffectChain(ctx, track.effects);
+        effectChains[track.id] = chain;
+
+        src.connect(gainNode);
+        gainNode.connect(panNode);
+        panNode.connect(chain.input);
+        chain.output.connect(dawAnalyserRef.current!);
 
         const delayFromPlayStart = Math.max(0, clipStart - startAt);
         const offsetInsideClipSec = Math.max(0, (startAt - clipStart) * track.rate);
@@ -547,6 +606,8 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
         src.start(baseAudioTime + delayFromPlayStart, offsetInsideClipSec, maxPlayDur * track.rate);
         sources.push(src);
       });
+
+      activeEffectChainsRef.current = effectChains;
 
       if (sources.length === 0) {
         setStatusMsg('No audio overlaps the current cursor or selection range.');
@@ -610,7 +671,11 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
     setRedoStack((r) => [
       ...r,
       {
-        tracks: tracks.map((t) => ({ ...t, buffer: t.buffer ? cloneAudioBuffer(ctx, t.buffer) : null })),
+        tracks: tracks.map((t) => ({
+          ...t,
+          buffer: t.buffer ? cloneAudioBuffer(ctx, t.buffer) : null,
+          effects: cloneTrackEffects(t.effects),
+        })),
         selectedTrackId,
       },
     ]);
@@ -627,7 +692,11 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
     setUndoStack((u) => [
       ...u,
       {
-        tracks: tracks.map((t) => ({ ...t, buffer: t.buffer ? cloneAudioBuffer(ctx, t.buffer) : null })),
+        tracks: tracks.map((t) => ({
+          ...t,
+          buffer: t.buffer ? cloneAudioBuffer(ctx, t.buffer) : null,
+          effects: cloneTrackEffects(t.effects),
+        })),
         selectedTrackId,
       },
     ]);
@@ -635,6 +704,46 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
     setSelectedTrackId(nextSnap.selectedTrackId);
     setRedoStack((r) => r.slice(0, -1));
     setStatusMsg('Redid DAW edit.');
+  };
+
+  const handleUpdateTrackEffects = useCallback(
+    (trackId: string, updater: (prev: TrackEffectsState) => TrackEffectsState) => {
+      setTracks((prev) =>
+        prev.map((t) =>
+          t.id === trackId ? { ...t, effects: updater(t.effects) } : t
+        )
+      );
+    },
+    []
+  );
+
+  const handleBakeTrackEffects = async (trackId: string) => {
+    const trk = tracks.find((t) => t.id === trackId);
+    if (!trk || !trk.buffer) {
+      setStatusMsg('Load or record audio on this track before baking the Effect Rack.');
+      return;
+    }
+    setBakingEffects(true);
+    try {
+      pushUndoSnapshot(tracks, selectedTrackId);
+      const baked = await bakeEffectRackIntoBuffer(trk.buffer, trk.effects);
+      setTracks((prev) =>
+        prev.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                buffer: baked,
+                effects: createDefaultTrackEffects(),
+              }
+            : t
+        )
+      );
+      setStatusMsg(`Baked real-time Effect Rack DSP directly into "${trk.name}".`);
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : 'Failed to bake track effects.');
+    } finally {
+      setBakingEffects(false);
+    }
   };
 
   // Resolve active edit window in track-local seconds
@@ -763,6 +872,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
         solo: false,
         rate: 1.0,
         viewMode: 'waveform',
+        effects: createDefaultTrackEffects(),
       },
     ]);
     setSelectedTrackId(newId);
@@ -781,6 +891,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
         id: newId,
         name: `${selectedTrack.name} (Copy)`,
         buffer: selectedTrack.buffer ? cloneAudioBuffer(ctx, selectedTrack.buffer) : null,
+        effects: cloneTrackEffects(selectedTrack.effects),
       },
     ]);
     setSelectedTrackId(newId);
@@ -825,6 +936,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
         solo: false,
         rate: 1.0,
         viewMode: 'waveform',
+        effects: createDefaultTrackEffects(),
       },
     ]);
     setSelectedTrackId(newId);
@@ -977,6 +1089,7 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
             solo: false,
             rate: 1.0,
             viewMode: 'waveform',
+            effects: createDefaultTrackEffects(),
           },
         ]);
         setSelectedTrackId(newId);
@@ -1440,6 +1553,18 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
             className="px-3 py-1.5 rounded-lg bg-[#13161B] hover:bg-[#1B2028] border border-[#232833] text-xs text-slate-200 transition-colors whitespace-nowrap"
           >
             House Stem
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowEffectRack((v) => !v)}
+            className={`px-3 py-1.5 rounded-lg border text-xs flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+              showEffectRack
+                ? 'bg-[#1B2028] border-cyan-500/50 text-cyan-300'
+                : 'bg-[#13161B] hover:bg-[#1B2028] border-[#232833] text-slate-300'
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Effect Rack</span>
           </button>
           <button
             type="button"
@@ -1941,6 +2066,25 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
 
                     {menu.id === 'effect' && (
                       <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenMenu(null);
+                            setShowEffectRack(true);
+                            window.setTimeout(() => {
+                              effectRackRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                            }, 50);
+                          }}
+                          className="w-full px-3 py-1.5 text-left hover:bg-[#1B2028] text-cyan-300 font-semibold flex items-center justify-between"
+                        >
+                          <span className="flex items-center gap-1.5">
+                            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+                            <span>Real-Time Effect Rack (Reverb / Delay / Comp)</span>
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 text-[9px] font-mono text-cyan-300">
+                            LIVE
+                          </span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => {
@@ -2626,6 +2770,45 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
                             : 'Empty'}
                         </span>
                         <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedTrackId(track.id);
+                              setShowEffectRack(true);
+                              window.setTimeout(() => {
+                                effectRackRef.current?.scrollIntoView({
+                                  behavior: 'smooth',
+                                  block: 'nearest',
+                                });
+                              }, 50);
+                            }}
+                            title="Open Real-Time Effect Rack (Reverb, Delay, Compressor) for this track"
+                            className={`px-1.5 py-0.5 rounded border text-[10px] font-mono transition-colors ${
+                              !track.effects.bypassAll &&
+                              (track.effects.compressor.enabled ||
+                                track.effects.delay.enabled ||
+                                track.effects.reverb.enabled)
+                                ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 font-semibold'
+                                : 'bg-[#0B0D10] border-[#232833] text-slate-400 hover:text-cyan-300'
+                            }`}
+                          >
+                            FX
+                            {!track.effects.bypassAll &&
+                            [
+                              track.effects.compressor.enabled,
+                              track.effects.delay.enabled,
+                              track.effects.reverb.enabled,
+                            ].filter(Boolean).length > 0
+                              ? `(${
+                                  [
+                                    track.effects.compressor.enabled,
+                                    track.effects.delay.enabled,
+                                    track.effects.reverb.enabled,
+                                  ].filter(Boolean).length
+                                })`
+                              : ''}
+                          </button>
                           {track.buffer && (
                             <button
                               type="button"
@@ -2735,6 +2918,28 @@ export function DawTab({ initialBpm = 112, initialBeatSignature = '4/4' }: DawTa
           </div>
         </div>
       </div>
+
+      {/* Real-Time Per-Track Effect Rack (Compressor, Delay, Reverb) */}
+      {showEffectRack && (
+        <div ref={effectRackRef}>
+          <DawEffectRack
+            tracks={tracks.map((t) => ({
+              id: t.id,
+              name: t.name,
+              hasBuffer: Boolean(t.buffer),
+              effects: t.effects,
+            }))}
+            selectedTrackId={selectedTrack?.id || tracks[0]?.id || 'trk_1'}
+            projectBpm={exportBpm}
+            isPlaying={isPlaying}
+            compressorReductionDb={compReductionDb}
+            bakingEffects={bakingEffects}
+            onSelectTrack={(trackId) => setSelectedTrackId(trackId)}
+            onUpdateTrackEffects={handleUpdateTrackEffects}
+            onBakeTrackEffects={handleBakeTrackEffects}
+          />
+        </div>
+      )}
 
       {/* AI Vocal Studio Polish & Beat Alignment Modal */}
       {showVocalPolishModal && (

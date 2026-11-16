@@ -23,13 +23,21 @@ import {
   Volume2,
   ThumbsUp,
   Radio,
+  RefreshCw,
 } from 'lucide-react';
 import { type User } from 'firebase/auth';
 import {
   upsertPrivateInfo,
   saveSocialCampaign,
+  upsertSocialSyncConfig,
+  subscribeSocialSyncConfig,
+  DEFAULT_SOCIAL_SYNC_CONFIG,
+  type SocialSyncConfig,
   type CreatorPrivateInfo,
+  type CreatorProfile,
+  type SavedMusicProject,
   type SavedSocialCampaign,
+  type CommunityActivityType,
 } from '../../firebase';
 import {
   getAudioContext,
@@ -37,11 +45,17 @@ import {
   renderGrooveBuffer,
 } from '../../audio/studioAudio';
 import { EmbeddedSocialFeed, type FeedGrooveStyle } from './EmbeddedSocialFeed';
+import { CommunityActivityFeed, type ActivityGrooveStyle } from './CommunityActivityFeed';
+import { SocialSyncModal } from '../SocialSyncModal';
+import { SocialStatsDashboard } from '../SocialStatsDashboard';
 
 interface SocialHubTabProps {
   user: User | null;
+  profile?: CreatorProfile | null;
   privateInfo: CreatorPrivateInfo | null;
   campaigns: SavedSocialCampaign[];
+  projects?: SavedMusicProject[];
+  creators?: CreatorProfile[];
   activeTrackTitle: string;
   studioBpm?: number;
   onOpenAuth: () => void;
@@ -78,12 +92,13 @@ interface WaMessage {
 
 interface PublishedDrop {
   id: string;
-  platform: SocialPlatform;
+  platform: SocialPlatform | 'soundcloud';
   headline: string;
   caption: string;
   trackTitle: string;
   timestamp: string;
   likes: number;
+  syncedViaAutoPublish?: boolean;
 }
 
 const PLATFORMS: {
@@ -138,8 +153,11 @@ const IG_SLIDES = [
 
 export function SocialHubTab({
   user,
+  profile = null,
   privateInfo,
   campaigns,
+  projects = [],
+  creators = [],
   activeTrackTitle,
   studioBpm = 112,
   onOpenAuth,
@@ -250,6 +268,47 @@ export function SocialHubTab({
   const [copied, setCopied] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [socialSyncOpen, setSocialSyncOpen] = useState(false);
+  const [savingSyncConfig, setSavingSyncConfig] = useState(false);
+  const [activityTrigger, setActivityTrigger] = useState<{
+    nonce: number;
+    activityType: CommunityActivityType;
+    title: string;
+    detail: string;
+    trackTitle?: string;
+    bpm?: number;
+    grooveStyle?: ActivityGrooveStyle;
+    milestoneTag?: string;
+    platform?: string;
+  } | null>(null);
+  const [socialSyncConfig, setSocialSyncConfig] = useState<SocialSyncConfig>(() => {
+    try {
+      const cached = localStorage.getItem('sounddeck_social_sync_config');
+      return cached ? { ...DEFAULT_SOCIAL_SYNC_CONFIG, ...JSON.parse(cached) } : DEFAULT_SOCIAL_SYNC_CONFIG;
+    } catch {
+      return DEFAULT_SOCIAL_SYNC_CONFIG;
+    }
+  });
+
+  // Persist Social Sync preferences locally for offline availability
+  useEffect(() => {
+    try {
+      localStorage.setItem('sounddeck_social_sync_config', JSON.stringify(socialSyncConfig));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [socialSyncConfig]);
+
+  // Real-time Firestore sync for Social Sync config when authenticated
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeSocialSyncConfig(user.uid, (remoteConfig) => {
+      if (remoteConfig) {
+        setSocialSyncConfig(remoteConfig);
+      }
+    });
+    return () => unsub();
+  }, [user]);
 
   // Sync loaded privateInfo handles & activeTrackTitle from parent
   useEffect(() => {
@@ -406,6 +465,46 @@ export function SocialHubTab({
     }
   };
 
+  const handleSaveSocialSync = async (
+    nextConfig: SocialSyncConfig,
+    nextHandles: {
+      instagramHandle: string;
+      tiktokHandle: string;
+      facebookPage: string;
+      whatsappNumber: string;
+    }
+  ) => {
+    setSavingSyncConfig(true);
+    setErrorMsg(null);
+    setSocialSyncConfig(nextConfig);
+    setIgHandle(nextHandles.instagramHandle);
+    setTiktokHandle(nextHandles.tiktokHandle);
+    setFbPage(nextHandles.facebookPage);
+    setWaNumber(nextHandles.whatsappNumber);
+
+    try {
+      if (user) {
+        await Promise.all([
+          upsertSocialSyncConfig(user.uid, nextConfig),
+          upsertPrivateInfo(user.uid, {
+            instagramHandle: nextHandles.instagramHandle.trim(),
+            tiktokHandle: nextHandles.tiktokHandle.trim(),
+            facebookPage: nextHandles.facebookPage.trim(),
+            whatsappNumber: nextHandles.whatsappNumber.trim(),
+          }),
+        ]);
+        onPrivateInfoSaved();
+        setFeedback('Social Sync auto-publishing settings saved & synced to cloud.');
+      } else {
+        setFeedback('Social Sync auto-publishing settings saved locally on this device.');
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to save Social Sync settings.');
+    } finally {
+      setSavingSyncConfig(false);
+    }
+  };
+
   const handleGenerateAiCaption = async () => {
     setGeneratingCaption(true);
     setErrorMsg(null);
@@ -487,8 +586,95 @@ export function SocialHubTab({
         timestamp: nowTime,
         likes: selectedPlatform === 'tiktok' ? ttLikes : selectedPlatform === 'instagram' ? igLikes : fbReactions.like,
       };
-      setPublishedFeed((prev) => [drop, ...prev].slice(0, 12));
-      setFeedback(`Published live to in-app ${PLATFORMS.find((p) => p.id === selectedPlatform)?.name} Feed.`);
+
+      const syncedPlatforms: (SocialPlatform | 'soundcloud')[] = [];
+      const shouldAutoSync = socialSyncConfig.autoPublishTracks || socialSyncConfig.autoPublishReels;
+      if (shouldAutoSync) {
+        if (socialSyncConfig.instagramEnabled && selectedPlatform !== 'instagram') syncedPlatforms.push('instagram');
+        if (socialSyncConfig.tiktokEnabled && selectedPlatform !== 'tiktok') syncedPlatforms.push('tiktok');
+        if (socialSyncConfig.soundcloudEnabled) syncedPlatforms.push('soundcloud');
+        if (socialSyncConfig.facebookEnabled && selectedPlatform !== 'facebook') syncedPlatforms.push('facebook');
+        if (socialSyncConfig.whatsappEnabled) syncedPlatforms.push('whatsapp');
+      }
+
+      const syncedDrops: PublishedDrop[] = syncedPlatforms.map((plat, idx) => ({
+        id: `drop_sync_${Date.now()}_${idx}`,
+        platform: plat,
+        headline,
+        caption: socialSyncConfig.includeSodaCard
+          ? `${caption}\n☕ Support on BuymeSoda`
+          : caption,
+        trackTitle,
+        timestamp: nowTime,
+        likes: plat === 'tiktok' ? ttLikes : plat === 'instagram' ? igLikes : fbReactions.like,
+        syncedViaAutoPublish: true,
+      }));
+
+      setPublishedFeed((prev) => [drop, ...syncedDrops, ...prev].slice(0, 16));
+
+      if (syncedPlatforms.includes('whatsapp')) {
+        setWaMessages((prev) => [
+          ...prev,
+          {
+            id: `wa_sync_${Date.now()}`,
+            sender: 'me',
+            author: 'Auto-Sync · Studio Owner',
+            text: `${headline}\n${caption}`,
+            time: nowTime,
+            hasAudio: true,
+            audioTitle: `${trackTitle} (${studioBpm} BPM)`,
+            audioStyle,
+            hasSodaCard: socialSyncConfig.includeSodaCard,
+            reactions: { '🔥': 1 },
+          },
+        ]);
+      }
+
+      const primaryName = PLATFORMS.find((p) => p.id === selectedPlatform)?.name || selectedPlatform;
+      if (syncedPlatforms.length > 0) {
+        const extraNames = syncedPlatforms
+          .map((p) => (p === 'soundcloud' ? 'SoundCloud' : PLATFORMS.find((x) => x.id === p)?.name || p))
+          .join(', ');
+        setFeedback(`Published to ${primaryName} and auto-synced to ${extraNames}!`);
+      } else {
+        setFeedback(`Published live to in-app ${primaryName} Feed.`);
+      }
+
+      setActivityTrigger({
+        nonce: Date.now(),
+        activityType: 'shared_track',
+        title: headline.trim() || `Shared "${trackTitle}" on ${primaryName}`,
+        detail: caption.trim() || `Published ${trackTitle} (${studioBpm} BPM) to ${primaryName}.`,
+        trackTitle,
+        bpm: studioBpm,
+        grooveStyle: audioStyle,
+        platform: primaryName,
+      });
+
+      if (user) {
+        setSavingCampaign(true);
+        try {
+          const firestoreTargets: SocialPlatform[] = [
+            selectedPlatform,
+            ...syncedPlatforms.filter((p): p is SocialPlatform => p !== 'soundcloud'),
+          ];
+          await Promise.all(
+            Array.from(new Set(firestoreTargets)).map((plat) =>
+              saveSocialCampaign(user.uid, {
+                platform: plat,
+                headline: headline.slice(0, 140),
+                caption: caption.slice(0, 2200),
+                trackTitle: trackTitle.slice(0, 120),
+              })
+            )
+          );
+        } catch (err) {
+          setErrorMsg(err instanceof Error ? err.message : 'Failed to sync drop to Firestore.');
+        } finally {
+          setSavingCampaign(false);
+        }
+      }
+      return;
     }
 
     if (user) {
@@ -750,11 +936,31 @@ export function SocialHubTab({
             Interactive Instagram, TikTok, WhatsApp, and Facebook creator studios brought to life directly inside SoundDeck.
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs text-slate-400 font-mono">
+        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400 font-mono">
           <span>{studioBpm} BPM Sync</span>
           <span className="text-[#232833]">|</span>
           <span>Active Track:</span>
           <span className="text-amber-400 truncate max-w-[200px]">{trackTitle}</span>
+          <button
+            type="button"
+            onClick={() => setSocialSyncOpen(true)}
+            className="ml-1 px-3 py-1.5 rounded-lg bg-[#1B2028] hover:bg-[#252B36] text-amber-300 border border-amber-500/40 font-sans text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>
+              Social Sync (
+              {
+                [
+                  socialSyncConfig.instagramEnabled,
+                  socialSyncConfig.tiktokEnabled,
+                  socialSyncConfig.soundcloudEnabled,
+                  socialSyncConfig.facebookEnabled,
+                  socialSyncConfig.whatsappEnabled,
+                ].filter(Boolean).length
+              }{' '}
+              Active)
+            </span>
+          </button>
         </div>
       </div>
 
@@ -780,17 +986,27 @@ export function SocialHubTab({
               In-App Creator Channels
             </h3>
             <p className="text-xs text-slate-400">
-              Select any channel card to launch its interactive studio below, or save your handles to your creator vault.
+              Select any channel card to launch its interactive studio below, or configure auto-publishing via Social Sync.
             </p>
           </div>
-          <button
-            type="submit"
-            disabled={savingHandles}
-            className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap"
-          >
-            <Save className="w-3.5 h-3.5" />
-            <span>{user ? (savingHandles ? 'Saving...' : 'Save Connections') : 'Sign In to Sync'}</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setSocialSyncOpen(true)}
+              className="px-3.5 py-2 rounded-lg bg-[#1B2028] hover:bg-[#252B36] text-slate-100 text-xs font-medium border border-[#2A313E] flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+              <span>Social Sync</span>
+            </button>
+            <button
+              type="submit"
+              disabled={savingHandles}
+              className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>{user ? (savingHandles ? 'Saving...' : 'Save Connections') : 'Sign In to Sync'}</span>
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -2042,6 +2258,36 @@ export function SocialHubTab({
         </div>
       </div>
 
+      {/* Live Community Activity Feed: Interactions, Shared Tracks & Project Milestones */}
+      <CommunityActivityFeed
+        user={user}
+        profile={profile}
+        projects={projects}
+        creators={creators}
+        activeTrackTitle={trackTitle}
+        studioBpm={studioBpm}
+        playingItemId={playingMessageId}
+        onToggleAudio={(itemId, style) => playSocialGroove(style, itemId)}
+        onLoadTrackIntoStudio={({ trackTitle: nextTitle, headline: nextHeadline, caption: nextCaption }) => {
+          setTrackTitle(nextTitle);
+          setHeadline(nextHeadline);
+          setCaption(nextCaption);
+          const el = document.getElementById('social-live-stage');
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }}
+        onSupportCreator={onSupportCreator}
+        onOpenAuth={onOpenAuth}
+        externalPostedTrigger={activityTrigger}
+      />
+
+      {/* Social Reach, Engagement & Follower Growth Stats Dashboard */}
+      <SocialStatsDashboard
+        user={user}
+        privateInfo={privateInfo}
+        socialSyncConfig={socialSyncConfig}
+        activeTrackTitle={trackTitle}
+      />
+
       {/* Dynamic Embedded Social Feed (Instagram, TikTok & WhatsApp SDKs/Widgets) */}
       <EmbeddedSocialFeed
         igHandle={activeIgName}
@@ -2087,7 +2333,9 @@ export function SocialHubTab({
                 key={item.id}
                 type="button"
                 onClick={() => {
-                  setSelectedPlatform(item.platform);
+                  if (item.platform !== 'soundcloud') {
+                    setSelectedPlatform(item.platform);
+                  }
                   setHeadline(item.headline);
                   setCaption(item.caption);
                   setTrackTitle(item.trackTitle);
@@ -2095,7 +2343,9 @@ export function SocialHubTab({
                 className="text-left p-3.5 rounded-lg bg-[#0B0D10] hover:bg-[#1B2028] border border-amber-500/30 transition-colors space-y-1.5"
               >
                 <div className="flex items-center justify-between text-[11px] font-mono">
-                  <span className="text-amber-400 uppercase">{item.platform} · Live</span>
+                  <span className="text-amber-400 uppercase">
+                    {item.platform} · {item.syncedViaAutoPublish ? 'Auto-Synced' : 'Live'}
+                  </span>
                   <span className="text-slate-400">{item.timestamp}</span>
                 </div>
                 <div className="text-xs font-semibold text-slate-100 truncate">{item.headline}</div>
@@ -2129,6 +2379,22 @@ export function SocialHubTab({
           </div>
         )}
       </div>
+
+      <SocialSyncModal
+        isOpen={socialSyncOpen}
+        onClose={() => setSocialSyncOpen(false)}
+        isSignedIn={Boolean(user)}
+        config={socialSyncConfig}
+        handles={{
+          instagramHandle: igHandle,
+          tiktokHandle: tiktokHandle,
+          facebookPage: fbPage,
+          whatsappNumber: waNumber,
+        }}
+        saving={savingSyncConfig}
+        onSave={handleSaveSocialSync}
+        onOpenAuth={onOpenAuth}
+      />
     </div>
   );
 }

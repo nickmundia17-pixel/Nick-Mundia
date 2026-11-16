@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -385,6 +386,369 @@ app.post('/api/gemini/chat', async (req, res) => {
       ? `${rawMsg} Switch to Gemini 4 Hydrogen or 3.1 Flash Lite, or attach a billing-enabled API key in Settings > Secrets.`
       : rawMsg;
     res.status(isQuotaOrBilling ? 402 : 500).json({ error: helpfulMessage });
+  }
+});
+
+// 5b. Bilingual/Trilingual (English, Kiswahili, Sheng) Structured Music Creation AI Assistant
+app.post('/api/gemini/assistant', async (req, res) => {
+  try {
+    const {
+      prompt,
+      languagePreference,
+      genre,
+      bpm,
+      musicalKey,
+      projectSummary,
+      history,
+    } = req.body as {
+      prompt?: string;
+      languagePreference?: 'auto' | 'english' | 'kiswahili' | 'sheng';
+      genre?: string;
+      bpm?: number;
+      musicalKey?: string;
+      projectSummary?: {
+        title?: string;
+        trackCount?: number;
+        trackNames?: string[];
+        hasVocals?: boolean;
+        existingLyrics?: string;
+      };
+      history?: { role: 'user' | 'model'; text: string }[];
+    };
+
+    if (!prompt?.trim()) {
+      res.status(400).json({ error: 'Please enter a musical question, concept, or prompt.' });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    const langInstruction =
+      languagePreference === 'kiswahili'
+        ? 'Respond naturally in fluent Kiswahili (with musical studio terms where helpful).'
+        : languagePreference === 'sheng'
+        ? 'Respond authentically in Nairobi Sheng mixed smoothly with musical production terms.'
+        : languagePreference === 'english'
+        ? 'Respond in crisp professional studio English.'
+        : 'Detect the user language (English, Kiswahili, or Kenyan Sheng) and mirror that language naturally.';
+
+    const sessionCtx = projectSummary
+      ? `Current DAW Project: "${projectSummary.title || 'Untitled'}", Genre: ${genre || 'Afrobeat'}, Tempo: ${bpm || 112} BPM, Key: ${musicalKey || 'A minor'}, Tracks (${projectSummary.trackCount || 0}): ${(projectSummary.trackNames || []).join(', ') || 'None yet'}, Has Vocals: ${projectSummary.hasVocals ? 'Yes' : 'No'}.`
+      : `Session Genre: ${genre || 'Afrobeat'}, Tempo: ${bpm || 112} BPM, Key: ${musicalKey || 'A minor'}.`;
+
+    const historyText =
+      Array.isArray(history) && history.length > 0
+        ? `Recent conversation:\n${history
+            .slice(-6)
+            .map((h) => `${h.role === 'user' ? 'Producer' : 'Assistant'}: ${h.text}`)
+            .join('\n')}\n\n`
+        : '';
+
+    const fullPrompt = `${sessionCtx}
+${historyText}Producer Request: ${prompt.trim()}
+
+${langInstruction}
+Provide creative, actionable production guidance. Always supply usable MIDI note numbers (e.g. C4 = 60, A3 = 57) for any chordProgression you suggest so the producer can optionally preview or load them into the Piano Roll.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: fullPrompt,
+      config: {
+        systemInstruction:
+          'You are SoundDeck Pro Studio AI — a veteran East African and global music producer, songwriter, and mixing engineer fluent in English, Kiswahili, and Kenyan Sheng (Gengetone/Arbantone/Afrobeats/Amapiano/Drill/Gospel/Trap). Never pretend text suggestions are audio renders. Always give concrete BPM, key, chord voicings as valid MIDI pitches (36-84), instrumentation, rhyme scheme, and mixing advice.',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            reply: { type: Type.STRING },
+            languageUsed: { type: Type.STRING },
+            songConcept: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                hookIdea: { type: Type.STRING },
+                vibeSummary: { type: Type.STRING },
+              },
+              required: ['title', 'hookIdea', 'vibeSummary'],
+            },
+            recommendedBpm: { type: Type.INTEGER },
+            recommendedKey: { type: Type.STRING },
+            rhymeScheme: { type: Type.STRING },
+            chordProgression: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  symbol: { type: Type.STRING },
+                  midiNotes: {
+                    type: Type.ARRAY,
+                    items: { type: Type.INTEGER },
+                  },
+                  durationBeats: { type: Type.INTEGER },
+                },
+                required: ['symbol', 'midiNotes', 'durationBeats'],
+              },
+            },
+            lyrics: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  section: { type: Type.STRING },
+                  lines: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+                required: ['section', 'lines'],
+              },
+            },
+            instrumentationSuggestions: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            arrangementFeedback: { type: Type.STRING },
+            mixingSuggestions: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: [
+            'reply',
+            'languageUsed',
+            'songConcept',
+            'recommendedBpm',
+            'recommendedKey',
+            'rhymeScheme',
+            'chordProgression',
+            'lyrics',
+            'instrumentationSuggestions',
+            'arrangementFeedback',
+            'mixingSuggestions',
+          ],
+        },
+      },
+    });
+
+    const parsed = JSON.parse((response.text ?? '{}').trim());
+    res.json(parsed);
+  } catch (error) {
+    console.error('AI Assistant error:', error);
+    const rawMsg = error instanceof Error ? error.message : 'Assistant request failed';
+    const isQuota = /RESOURCE_EXHAUSTED|429|PERMISSION_DENIED|403|billing|paid/i.test(rawMsg);
+    res.status(isQuota ? 402 : 500).json({ error: rawMsg });
+  }
+});
+
+// 5c. AI Mastering Acoustic Telemetry Advisor (Advisory recommendations clearly separated from DSP execution)
+app.post('/api/gemini/mastering', async (req, res) => {
+  try {
+    const { stats, genre, targetPlatform } = req.body as {
+      stats?: {
+        peakDbfs?: number;
+        integratedLufsApprox?: number;
+        crestFactorDb?: number;
+        lowEnergyPct?: number;
+        midEnergyPct?: number;
+        highEnergyPct?: number;
+        stereoCorrelation?: number;
+        durationSec?: number;
+      };
+      genre?: string;
+      targetPlatform?: string;
+    };
+
+    if (!stats) {
+      res.status(400).json({ error: 'Measured audio telemetry stats are required.' });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    const prompt = `Analyze these real measured master mix acoustic telemetry values and recommend mastering adjustments for ${genre || 'Afrobeat'} targeting ${targetPlatform || 'Spotify / Apple Music (-14 LUFS)'}.
+
+Measured Audio Metrics:
+- True Peak: ${stats.peakDbfs ?? -1.5} dBFS
+- Estimated Integrated Loudness: ${stats.integratedLufsApprox ?? -16} LUFS
+- Crest Factor (Dynamics): ${stats.crestFactorDb ?? 9} dB
+- Spectral Distribution -> Low (20-250Hz): ${stats.lowEnergyPct ?? 34}%, Mid (250Hz-4kHz): ${stats.midEnergyPct ?? 42}%, High (4kHz-20kHz): ${stats.highEnergyPct ?? 24}%
+- Stereo Phase Correlation (-1 to +1): ${stats.stereoCorrelation ?? 0.85}
+
+Return concrete mastering chain recommendations (Master EQ dB shifts, 3-band multiband compression thresholds/ratios, and limiter ceiling). Note clearly if the stereo correlation indicates phase issues or excessive sub-bass.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: prompt,
+      config: {
+        systemInstruction:
+          'You are a senior mastering engineer. Base every recommendation strictly on the measured acoustic metrics provided. Keep gains within safe mastering margins (-6 dB to +6 dB).',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summary: { type: Type.STRING },
+            targetLufs: { type: Type.NUMBER },
+            recommendedLowEqDb: { type: Type.NUMBER },
+            recommendedMidEqDb: { type: Type.NUMBER },
+            recommendedHighEqDb: { type: Type.NUMBER },
+            multibandLowThresholdDb: { type: Type.NUMBER },
+            multibandMidThresholdDb: { type: Type.NUMBER },
+            multibandHighThresholdDb: { type: Type.NUMBER },
+            limiterCeilingDb: { type: Type.NUMBER },
+            stereoWidthRecommendation: { type: Type.STRING },
+            warnings: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: [
+            'summary',
+            'targetLufs',
+            'recommendedLowEqDb',
+            'recommendedMidEqDb',
+            'recommendedHighEqDb',
+            'multibandLowThresholdDb',
+            'multibandMidThresholdDb',
+            'multibandHighThresholdDb',
+            'limiterCeilingDb',
+            'stereoWidthRecommendation',
+            'warnings',
+          ],
+        },
+      },
+    });
+
+    const parsed = JSON.parse((response.text ?? '{}').trim());
+    res.json(parsed);
+  } catch (error) {
+    console.error('AI Mastering advisor error:', error);
+    const message = error instanceof Error ? error.message : 'Mastering analysis failed';
+    res.status(500).json({ error: message });
+  }
+});
+
+// 5d. Stem Separation Service Endpoint (Real External Demucs Integration Only — Never Faked)
+app.get('/api/audio/separate-stems/status', (_req, res) => {
+  const hasReplicate = Boolean(process.env.REPLICATE_API_TOKEN?.trim());
+  const hasCustomUrl = Boolean(process.env.STEM_SEPARATION_API_URL?.trim());
+  res.json({
+    configured: hasReplicate || hasCustomUrl,
+    provider: hasCustomUrl ? 'custom_demucs_endpoint' : hasReplicate ? 'replicate_demucs' : null,
+    requiredSecrets: ['REPLICATE_API_TOKEN', 'STEM_SEPARATION_API_URL'],
+  });
+});
+
+app.post('/api/audio/separate-stems', express.json({ limit: '32mb' }), async (req, res) => {
+  try {
+    const customUrl = process.env.STEM_SEPARATION_API_URL?.trim();
+    const replicateToken = process.env.REPLICATE_API_TOKEN?.trim();
+
+    if (!customUrl && !replicateToken) {
+      res.status(501).json({
+        configured: false,
+        error: 'External stem separation service is not configured on this server.',
+        requiredSecrets: ['REPLICATE_API_TOKEN', 'STEM_SEPARATION_API_URL'],
+      });
+      return;
+    }
+
+    const { audioBase64, mimeType, fileName } = req.body as {
+      audioBase64?: string;
+      mimeType?: string;
+      fileName?: string;
+    };
+
+    if (!audioBase64) {
+      res.status(400).json({ error: 'Missing encoded audio payload.' });
+      return;
+    }
+
+    if (customUrl) {
+      const upstream = await fetch(customUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioBase64, mimeType: mimeType || 'audio/wav', fileName: fileName || 'track.wav' }),
+      });
+      const data = await upstream.json();
+      if (!upstream.ok) {
+        res.status(upstream.status).json({ error: data?.error || 'Custom stem separation service failed.' });
+        return;
+      }
+      res.json({ configured: true, stems: data.stems || data });
+      return;
+    }
+
+    // Replicate Demucs prediction flow
+    const dataUri = `data:${mimeType || 'audio/wav'};base64,${audioBase64}`;
+    const createRes = await fetch('https://api.replicate.com/v1/models/cjwbw/demucs/predictions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${replicateToken}`,
+        'Content-Type': 'application/json',
+        Prefer: 'wait=55',
+      },
+      body: JSON.stringify({
+        input: {
+          audio: dataUri,
+          stem: 'none',
+          output_format: 'wav',
+        },
+      }),
+    });
+
+    if (!createRes.ok) {
+      const errText = await createRes.text();
+      res.status(createRes.status).json({ error: `Replicate Demucs API error: ${errText.slice(0, 240)}` });
+      return;
+    }
+
+    let prediction = (await createRes.json()) as {
+      id?: string;
+      status?: string;
+      urls?: { get?: string };
+      output?: Record<string, string>;
+      error?: string;
+    };
+
+    let pollCount = 0;
+    while (
+      (prediction.status === 'starting' || prediction.status === 'processing') &&
+      prediction.urls?.get &&
+      pollCount < 20
+    ) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const pollRes = await fetch(prediction.urls.get, {
+        headers: { Authorization: `Bearer ${replicateToken}` },
+      });
+      if (!pollRes.ok) break;
+      prediction = (await pollRes.json()) as typeof prediction;
+      pollCount++;
+    }
+
+    if (prediction.status !== 'succeeded' || !prediction.output) {
+      res.status(502).json({
+        error: prediction.error || `Stem separation ended with status: ${prediction.status || 'unknown'}`,
+      });
+      return;
+    }
+
+    const stemKeys = ['vocals', 'drums', 'bass', 'other'] as const;
+    const stems: Record<string, string> = {};
+    await Promise.all(
+      stemKeys.map(async (k) => {
+        const stemUrl = prediction.output?.[k];
+        if (!stemUrl) return;
+        const audioRes = await fetch(stemUrl);
+        if (audioRes.ok) {
+          const buf = Buffer.from(await audioRes.arrayBuffer());
+          stems[k] = `data:audio/wav;base64,${buf.toString('base64')}`;
+        }
+      })
+    );
+
+    res.json({ configured: true, stems });
+  } catch (error) {
+    console.error('Stem separation error:', error);
+    const message = error instanceof Error ? error.message : 'Stem separation request failed';
+    res.status(500).json({ error: message });
   }
 });
 
@@ -1349,10 +1713,53 @@ app.get('/api/discover/preview-proxy', async (req, res) => {
 });
 
 async function startServer() {
+  const httpServer = http.createServer(app);
+  const disableHmr = process.env.DISABLE_HMR === 'true';
+
   if (process.env.NODE_ENV !== 'production') {
+    if (disableHmr) {
+      app.get('/@vite/client', (_req, res) => {
+        res.type('application/javascript').send(`
+export const ErrorOverlay = class {};
+export function createHotContext() {
+  return {
+    accept() {},
+    dispose() {},
+    prune() {},
+    invalidate() {},
+    decline() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+export function updateStyle(id, content) {
+  let style = document.querySelector(\`style[data-vite-dev-id="\${id}"]\`);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('data-vite-dev-id', id);
+    document.head.appendChild(style);
+  }
+  style.textContent = content;
+}
+export function removeStyle(id) {
+  const style = document.querySelector(\`style[data-vite-dev-id="\${id}"]\`);
+  if (style) style.remove();
+}
+export function injectQuery(url) {
+  return url;
+}
+`);
+      });
+    }
+
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: disableHmr ? false : { server: httpServer },
+        ws: disableHmr ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1364,14 +1771,9 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`SoundDeck Studio server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
-// On Vercel the app is served by the api/index.ts serverless function instead of a long-lived listener.
-if (!process.env.VERCEL) {
-  startServer();
-}
-
-export default app;
+startServer();

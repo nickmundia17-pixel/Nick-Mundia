@@ -1,7 +1,8 @@
 import { useState, useRef } from 'react';
-import { X, Mail, Phone, ShieldCheck, UserCheck, Disc3 } from 'lucide-react';
+import { X, Mail, Phone, ShieldCheck, UserCheck, Disc3, Copy, Check, ExternalLink } from 'lucide-react';
 import {
   type ConfirmationResult,
+  type RecaptchaVerifier,
   type User,
 } from 'firebase/auth';
 import {
@@ -16,6 +17,7 @@ import {
   type CreatorProfile,
   type CreatorRole,
 } from '../firebase';
+import firebaseConfig from '../../firebase-applet-config.json';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -34,7 +36,7 @@ export function AuthModal({
   profile,
   onProfileSaved,
 }: AuthModalProps) {
-  const [authTab, setAuthTab] = useState<AuthTab>('email');
+  const [authTab, setAuthTab] = useState<AuthTab>('google');
   const [role, setRole] = useState<CreatorRole>(profile?.role || 'artist');
   const [displayName, setDisplayName] = useState(profile?.displayName || user?.displayName || '');
   const [buyMeSodaHandle, setBuyMeSodaHandle] = useState(profile?.buyMeSodaHandle || '');
@@ -50,25 +52,29 @@ export function AuthModal({
   const [otpCode, setOtpCode] = useState('');
   const [confirmation, setConfirmation] = useState<ConfirmationResult | null>(null);
   const recaptchaContainerRef = useRef<HTMLDivElement | null>(null);
+  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [copiedHost, setCopiedHost] = useState(false);
 
   if (!isOpen) return null;
 
   const formatAuthError = (err: unknown): string => {
     const raw = err instanceof Error ? err.message : String(err);
     if (raw.includes('auth/operation-not-allowed')) {
-      const provider = authTab === 'phone' ? 'Phone' : authTab === 'email' ? 'Email/Password' : 'Google';
-      return `${provider} sign-in isn't switched on for this studio yet, so accounts can't be created this way. (Site owner: enable "${provider}" in Firebase Console > Authentication > Sign-in method.)`;
+      return 'This sign-in provider is not enabled yet in your Firebase Console (Authentication > Sign-in method). Google Sign-In is enabled by default.';
     }
     if (raw.includes('auth/unauthorized-domain')) {
-      setAuthTab('email');
-      return `Google and phone sign-in aren't enabled for ${window.location.hostname} yet. Use Email & Password below to register or sign in now. (Site owner: add "${window.location.hostname}" in Firebase Console > Authentication > Settings > Authorized domains.)`;
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      return `Domain "${host}" must be listed under Firebase Console > Project "${firebaseConfig.projectId}" > Authentication > Settings > Authorized domains.`;
     }
     if (raw.includes('auth/popup-closed-by-user')) {
       return 'Sign-in popup was closed before completing authentication.';
+    }
+    if (raw.includes('auth/popup-blocked')) {
+      return 'Sign-in popup was blocked by the browser. Please allow popups for this site and try again.';
     }
     if (raw.includes('auth/invalid-phone-number')) {
       return 'Please enter a valid international phone number including country code (e.g. +14155550199).';
@@ -106,7 +112,16 @@ export function AuthModal({
     setErrorMsg(null);
     setStatusMsg(null);
     try {
+      if (recaptchaVerifierRef.current) {
+        try {
+          recaptchaVerifierRef.current.clear();
+        } catch {
+          // ignore cleanup failure
+        }
+        recaptchaVerifierRef.current = null;
+      }
       const verifier = createPhoneRecaptcha('recaptcha-container-node');
+      recaptchaVerifierRef.current = verifier;
       const result = await startPhoneSignIn(phoneNumber.trim(), verifier);
       setConfirmation(result);
       setStatusMsg('Verification SMS code sent. Enter the 6-digit code below.');
@@ -149,24 +164,34 @@ export function AuthModal({
     setStatusMsg(null);
     try {
       if (emailMode === 'register') {
-        const newUser = await registerWithEmail(email.trim(), password, displayName.trim() || 'Studio Creator');
+        const nameToUse = displayName.trim() || 'Studio Creator';
+        const newUser = await registerWithEmail(email.trim(), password, nameToUse);
+        await upsertCreatorProfile(newUser.uid, {
+          displayName: nameToUse,
+          role,
+          buyMeSodaHandle,
+          bio,
+        });
+        await upsertPrivateInfo(newUser.uid, {
+          email: newUser.email || email.trim(),
+        });
+        onProfileSaved();
         setStatusMsg(
-          `Account created for ${newUser.email}. Please check your inbox and click the verification link before saving cloud projects.`
+          `Account created for ${newUser.email} and studio profile synced! Verification email sent.`
         );
       } else {
         const existingUser = await loginWithEmail(email.trim(), password);
-        if (existingUser.emailVerified) {
-          await upsertCreatorProfile(existingUser.uid, {
-            displayName: displayName.trim() || existingUser.displayName || 'Studio Creator',
-            role,
-            buyMeSodaHandle,
-            bio,
-          });
-          onProfileSaved();
-          setStatusMsg('Signed in and profile synced.');
-        } else {
-          setStatusMsg('Signed in. Verify your email address to unlock cloud saves.');
-        }
+        await upsertCreatorProfile(existingUser.uid, {
+          displayName: displayName.trim() || existingUser.displayName || 'Studio Creator',
+          role,
+          buyMeSodaHandle,
+          bio,
+        });
+        await upsertPrivateInfo(existingUser.uid, {
+          email: existingUser.email || email.trim(),
+        });
+        onProfileSaved();
+        setStatusMsg('Signed in and studio profile synced.');
       }
     } catch (err) {
       setErrorMsg(formatAuthError(err));
@@ -219,7 +244,11 @@ export function AuthModal({
       <div className="w-full max-w-lg rounded-xl bg-[#13161B] border border-[#232833] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-[#232833]">
           <div className="flex items-center gap-2.5">
-            <Disc3 className="w-5 h-5 text-amber-400" />
+            <img
+              src="/app-logo.png"
+              alt="SoundDeck Studio logo"
+              className="w-6 h-6 rounded-md object-cover border border-purple-500/40"
+            />
             <h2 className="font-display text-lg font-semibold text-slate-100">
               {user ? 'Creator Studio Profile' : 'Register or Sign In'}
             </h2>
@@ -236,8 +265,33 @@ export function AuthModal({
 
         <div className="p-6 overflow-y-auto space-y-5">
           {errorMsg && (
-            <div className="p-3 rounded-lg bg-red-950/50 border border-red-800/60 text-xs text-red-200 leading-relaxed">
-              {errorMsg}
+            <div className="p-3 rounded-lg bg-red-950/50 border border-red-800/60 text-xs text-red-200 leading-relaxed space-y-2">
+              <p>{errorMsg}</p>
+              {errorMsg.includes('Authorized domains') && typeof window !== 'undefined' && (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(window.location.hostname);
+                      setCopiedHost(true);
+                      setTimeout(() => setCopiedHost(false), 2000);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-red-900/60 hover:bg-red-800/70 text-red-100 font-mono text-[11px] transition-colors"
+                  >
+                    {copiedHost ? <Check className="w-3 h-3 text-emerald-300" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedHost ? 'Copied Domain' : `Copy: ${window.location.hostname}`}</span>
+                  </button>
+                  <a
+                    href={`https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 font-medium text-[11px] transition-colors"
+                  >
+                    <span>Open Firebase Auth Settings</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              )}
             </div>
           )}
           {statusMsg && (

@@ -22,6 +22,8 @@ interface StepSequencerGridProps {
   onClearPattern: () => void;
   onRandomizePattern: () => void;
   onTriggerPad: (padId: DrumPadId) => void;
+  isMidiRecording?: boolean;
+  onToggleMidiRecord?: () => void;
 }
 
 export function StepSequencerGrid({
@@ -42,6 +44,8 @@ export function StepSequencerGrid({
   onClearPattern,
   onRandomizePattern,
   onTriggerPad,
+  isMidiRecording = false,
+  onToggleMidiRecord,
 }: StepSequencerGridProps) {
   const [stepCount, setStepCount] = useState<16 | 32>(16);
   const [mutedLanes, setMutedLanes] = useState<Record<string, boolean>>({});
@@ -91,6 +95,22 @@ export function StepSequencerGrid({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          {onToggleMidiRecord && (
+            <button
+              type="button"
+              onClick={onToggleMidiRecord}
+              className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                isMidiRecording
+                  ? 'bg-red-600 text-white border border-red-400 animate-pulse'
+                  : 'bg-[#1B2028] hover:bg-[#252B36] text-red-300 border border-red-500/40'
+              }`}
+              title="Record pad hits in real-time into the step sequencer"
+            >
+              <div className={`w-2 h-2 rounded-full ${isMidiRecording ? 'bg-white' : 'bg-red-500'}`} />
+              <span>{isMidiRecording ? 'MIDI Recording...' : 'Record Pad MIDI'}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onTogglePlay}

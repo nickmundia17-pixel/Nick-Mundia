@@ -79,9 +79,65 @@
       },
       "required": ["uid", "updatedAt"]
     },
+    "SocialSyncConfig": {
+      "title": "SocialSyncConfig",
+      "description": "Auto-publishing and cross-platform social sync preferences for tracks and reels across Instagram, TikTok, SoundCloud, Facebook, and WhatsApp.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "autoPublishTracks": {
+          "type": "boolean"
+        },
+        "autoPublishReels": {
+          "type": "boolean"
+        },
+        "includeSodaCard": {
+          "type": "boolean"
+        },
+        "instagramEnabled": {
+          "type": "boolean"
+        },
+        "tiktokEnabled": {
+          "type": "boolean"
+        },
+        "soundcloudEnabled": {
+          "type": "boolean"
+        },
+        "facebookEnabled": {
+          "type": "boolean"
+        },
+        "whatsappEnabled": {
+          "type": "boolean"
+        },
+        "soundcloudHandle": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "autoPublishTracks",
+        "autoPublishReels",
+        "includeSodaCard",
+        "instagramEnabled",
+        "tiktokEnabled",
+        "soundcloudEnabled",
+        "facebookEnabled",
+        "whatsappEnabled",
+        "updatedAt"
+      ]
+    },
     "MusicProject": {
       "title": "MusicProject",
-      "description": "Saved lyrics, beat settings, and voice alignment notes created in Music Creation or DAW.",
+      "description": "Saved lyrics, beat settings, multitrack DAW state, MIDI notes, effects, and voice alignment notes created in Music Creation or DAW.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -94,12 +150,24 @@
           "minLength": 1,
           "maxLength": 120
         },
+        "category": {
+          "type": "string",
+          "enum": ["beat", "recording", "song"]
+        },
         "genre": {
           "type": "string",
           "maxLength": 60
         },
         "bpm": {
           "type": "number"
+        },
+        "musicalKey": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "timeSignature": {
+          "type": "string",
+          "maxLength": 16
         },
         "lyrics": {
           "type": "string",
@@ -112,6 +180,10 @@
         "kitName": {
           "type": "string",
           "maxLength": 60
+        },
+        "studioStateJson": {
+          "type": "string",
+          "maxLength": 120000
         },
         "createdAt": {
           "type": "string",
@@ -283,6 +355,244 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "CommunityActivity": {
+      "title": "CommunityActivity",
+      "description": "Live community feed item capturing shared tracks, user interactions, and project milestones.",
+      "type": "object",
+      "properties": {
+        "authorId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "authorRole": {
+          "type": "string",
+          "enum": ["artist", "creator", "dj", "listener"]
+        },
+        "activityType": {
+          "type": "string",
+          "enum": ["interaction", "shared_track", "milestone"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "trackTitle": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "bpm": {
+          "type": "number"
+        },
+        "grooveStyle": {
+          "type": "string",
+          "enum": ["afro", "house", "trap"]
+        },
+        "milestoneTag": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "likesCount": {
+          "type": "integer"
+        },
+        "commentsCount": {
+          "type": "integer"
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "authorId",
+        "authorName",
+        "authorRole",
+        "activityType",
+        "title",
+        "detail",
+        "likesCount",
+        "commentsCount",
+        "isPublic",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CommunityActivityComment": {
+      "title": "CommunityActivityComment",
+      "description": "Community reply or engagement comment on a live activity feed entry.",
+      "type": "object",
+      "properties": {
+        "activityId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "activityId",
+        "authorId",
+        "authorName",
+        "text",
+        "isPublic",
+        "createdAt"
+      ]
+    },
+    "VocalPreset": {
+      "title": "VocalPreset",
+      "description": "User-saved custom Vocal Intelligence EQ, compression, de-essing, and pitch preset.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "presetJson": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 8000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "name", "presetJson", "createdAt"]
+    },
+    "StudioCollaboration": {
+      "title": "StudioCollaboration",
+      "description": "Shared collaborative music workspace room tracking collaborators, roles, track comments, and project versions.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "bpm": {
+          "type": "number"
+        },
+        "musicalKey": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "collaboratorEmails": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 160 }
+        },
+        "stateJson": {
+          "type": "string",
+          "maxLength": 60000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectTitle", "bpm", "collaboratorEmails", "stateJson", "createdAt", "updatedAt"]
+    },
+    "StudioExportLog": {
+      "title": "StudioExportLog",
+      "description": "Immutable export & ownership audit record for rendered WAV, MP3, stems, and project backups.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "format": {
+          "type": "string",
+          "enum": ["wav", "mp3", "stems", "backup_json"]
+        },
+        "sampleRate": {
+          "type": "integer"
+        },
+        "bitDepth": {
+          "type": "integer"
+        },
+        "sizeBytes": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "projectTitle", "fileName", "format", "sampleRate", "sizeBytes", "createdAt"]
     }
   },
   "firestore": {
@@ -294,9 +604,13 @@
       "schema": { "$ref": "#/entities/CreatorPrivateInfo" },
       "description": "Isolated PII and private social handles accessible only by the owner."
     },
+    "/users/{userId}/private/social_sync": {
+      "schema": { "$ref": "#/entities/SocialSyncConfig" },
+      "description": "Isolated Social Sync auto-publishing preferences accessible only by the owner."
+    },
     "/projects/{projectId}": {
       "schema": { "$ref": "#/entities/MusicProject" },
-      "description": "User-owned music projects, lyrics, and beat/alignment sessions."
+      "description": "User-owned music projects, lyrics, DAW tracks/MIDI state, and beat/alignment sessions."
     },
     "/social_campaigns/{campaignId}": {
       "schema": { "$ref": "#/entities/SocialCampaign" },
@@ -309,6 +623,26 @@
     "/pad_assignments/{assignmentId}": {
       "schema": { "$ref": "#/entities/PadSampleAssignment" },
       "description": "Per-user custom Discover sample assignments mapped to beat pads."
+    },
+    "/community_activities/{activityId}": {
+      "schema": { "$ref": "#/entities/CommunityActivity" },
+      "description": "Live community activity feed displaying user interactions, shared tracks, and project milestones."
+    },
+    "/community_activities/{activityId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/CommunityActivityComment" },
+      "description": "Community comments and engagement replies on live activity feed posts."
+    },
+    "/vocal_presets/{presetId}": {
+      "schema": { "$ref": "#/entities/VocalPreset" },
+      "description": "Custom saved Vocal Intelligence DSP presets owned by individual users."
+    },
+    "/studio_collaborations/{collabId}": {
+      "schema": { "$ref": "#/entities/StudioCollaboration" },
+      "description": "Collaborative studio workspaces shared across project owners and invited collaborators."
+    },
+    "/export_logs/{exportId}": {
+      "schema": { "$ref": "#/entities/StudioExportLog" },
+      "description": "Owner-scoped export history and rights provenance logs."
     }
   }
 }

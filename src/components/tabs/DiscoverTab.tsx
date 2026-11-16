@@ -16,6 +16,8 @@ import {
   Users,
   CheckCircle2,
   X,
+  SkipForward,
+  ListMusic,
 } from 'lucide-react';
 import { type User } from 'firebase/auth';
 import {
@@ -30,15 +32,20 @@ import {
   DISCOVER_CATALOG_TRACKS,
   type DiscoverCatalogTrack,
 } from '../../audio/discoverCatalog';
+import {
+  saveOfflineAudioBlob,
+  deleteOfflineAudioBlob,
+  clearOfflineAudioBlobs,
+} from '../../audio/offlineLibraryDb';
 import { type PadSampleAssignment } from '../../firebase';
 import {
   type GlobalSearchTrack,
+  type OfflineLibraryTrack,
   type YoutubeMatchItem,
   type SoundCloudArtistProfile,
   type PersistentPlayerState,
 } from '../../types/discoverPlayer';
 import { LiveLyricsShower } from '../LiveLyricsShower';
-import { readJson } from '../../lib/readJson';
 
 interface DiscoverTabProps {
   user: User | null;
@@ -47,7 +54,12 @@ interface DiscoverTabProps {
   onPlayGlobalTrack: (
     track: GlobalSearchTrack,
     mode: 'preview' | 'full',
-    cachedVersions?: YoutubeMatchItem[]
+    cachedVersions?: YoutubeMatchItem[],
+    queueContext?: {
+      queue: GlobalSearchTrack[];
+      queueIndex: number;
+      queueLabel?: string;
+    }
   ) => void;
   onPlayCatalogTrack: (track: DiscoverCatalogTrack) => void;
   onAssignSampleToPad: (params: {
@@ -132,6 +144,165 @@ export function DiscoverTab({
   const [ytLoading, setYtLoading] = useState(false);
 
   // Catalog Export & Pad Assignment
+  const [discoverView, setDiscoverView] = useState<'explore' | 'offlineLibrary'>('explore');
+  const [offlineFilter, setOfflineFilter] = useState('');
+  const [offlineLibrary, setOfflineLibrary] = useState<OfflineLibraryTrack[]>(() => {
+    try {
+      const saved = localStorage.getItem('sounddeck_offline_library_songs');
+      return saved ? (JSON.parse(saved) as OfflineLibraryTrack[]) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('sounddeck_offline_library_songs', JSON.stringify(offlineLibrary));
+    } catch {
+      // quota
+    }
+  }, [offlineLibrary]);
+
+  const toGlobalQueueTrack = (song: OfflineLibraryTrack): GlobalSearchTrack => ({
+    id: song.id,
+    title: song.title,
+    artist: song.artist,
+    album: song.album,
+    genre: song.genre,
+    durationSec: song.durationSec,
+    coverUrl: song.coverUrl,
+    previewUrl: song.previewUrl || '',
+    fullAudioUrl: song.fullAudioUrl || '',
+    youtubeVideoId: song.youtubeVideoId,
+    soundcloudPermalink: song.soundcloudPermalink,
+    soundcloudTrackId: song.soundcloudTrackId,
+    source: (song.source as GlobalSearchTrack['source']) || 'deezer',
+    score: 100,
+  });
+
+  const handlePlayOfflineTrackAt = (index: number, list: OfflineLibraryTrack[] = offlineLibrary) => {
+    if (list.length === 0 || index < 0 || index >= list.length) return;
+    const queue = list.map(toGlobalQueueTrack);
+    onPlayGlobalTrack(queue[index], 'full', undefined, {
+      queue,
+      queueIndex: index,
+      queueLabel: 'Offline Library',
+    });
+  };
+
+  const handleDownloadFullSongToDeviceAndLibrary = async (track: {
+    id: string;
+    title: string;
+    artist: string;
+    album?: string;
+    genre?: string;
+    durationSec?: number;
+    coverUrl?: string;
+    previewUrl?: string | null;
+    fullAudioUrl?: string | null;
+    youtubeVideoId?: string;
+    soundcloudPermalink?: string;
+    soundcloudTrackId?: number;
+    source?: string;
+  }) => {
+    setExportingId(track.id);
+    setStatusMsg(null);
+    try {
+      let audioUrl = track.fullAudioUrl || track.previewUrl || '';
+      if (!audioUrl && track.source === 'soundcloud' && track.soundcloudTrackId) {
+        try {
+          const scRes = await fetch(
+            `/api/discover/soundcloud-stream?trackId=${encodeURIComponent(String(track.soundcloudTrackId))}`
+          );
+          const scJson = (await scRes.json()) as { streamUrl?: string | null };
+          if (scJson.streamUrl) audioUrl = scJson.streamUrl;
+        } catch {
+          // fallback below
+        }
+      }
+
+      let blob: Blob;
+      let isRealOfflineAudio = false;
+      if (audioUrl) {
+        try {
+          const resp = await fetch(audioUrl);
+          if (resp.ok) {
+            blob = await resp.blob();
+            isRealOfflineAudio = true;
+          } else {
+            throw new Error('Direct fetch failed');
+          }
+        } catch {
+          try {
+            const proxyRes = await fetch(`/api/discover/preview-proxy?url=${encodeURIComponent(audioUrl)}`);
+            if (proxyRes.ok) {
+              blob = await proxyRes.blob();
+              isRealOfflineAudio = true;
+            } else {
+              throw new Error('Proxy failed');
+            }
+          } catch {
+            const buf = await renderGrooveBuffer('afro', 112, 4);
+            blob = audioBufferToWavBlob(buf);
+          }
+        }
+      } else {
+        const buf = await renderGrooveBuffer('afro', 112, 4);
+        blob = audioBufferToWavBlob(buf);
+        if (track.source === 'catalog') {
+          isRealOfflineAudio = true;
+        }
+      }
+
+      const slug = track.title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const ext = exportFormat === 'wav' ? 'wav' : exportFormat === 'mp3' ? 'mp3' : 'webm';
+      triggerBlobDownload(blob, `${slug}-full.${ext}`);
+
+      const savedToIndexedDb = isRealOfflineAudio
+        ? await saveOfflineAudioBlob(track.id, blob)
+        : false;
+
+      const newRecord: OfflineLibraryTrack = {
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        album: track.album || 'SoundDeck Offline Stream',
+        genre: track.genre || 'Global Music',
+        durationSec: track.durationSec || 180,
+        coverUrl: track.coverUrl || '',
+        downloadedAt: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        source: track.source || 'global',
+        previewUrl: track.previewUrl || undefined,
+        fullAudioUrl: track.fullAudioUrl || (audioUrl || undefined),
+        youtubeVideoId: track.youtubeVideoId,
+        soundcloudPermalink: track.soundcloudPermalink,
+        soundcloudTrackId: track.soundcloudTrackId,
+        hasLocalBlob: savedToIndexedDb,
+      };
+
+      setOfflineLibrary((prev) => {
+        const filtered = prev.filter((p) => p.id !== track.id);
+        return [newRecord, ...filtered];
+      });
+
+      setStatusMsg(`Saved "${track.title}" to your device and Offline Library (auto-next queue ready).`);
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : 'Download failed.');
+    } finally {
+      setExportingId(null);
+    }
+  };
+
+  const handleRemoveOfflineSong = (id: string) => {
+    setOfflineLibrary((prev) => prev.filter((s) => s.id !== id));
+    void deleteOfflineAudioBlob(id);
+  };
+
+  const handleClearOfflineLibrary = () => {
+    setOfflineLibrary([]);
+    void clearOfflineAudioBlobs();
+  };
+
   const [customTrack, setCustomTrack] = useState<{ id: string; title: string; buffer: AudioBuffer } | null>(null);
   const [exportFormat, setExportFormat] = useState<'wav' | 'mp3' | 'ogg' | 'mp4'>('wav');
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -167,13 +338,13 @@ export function DiscoverTab({
     setArtistTracks([]);
     try {
       const res = await fetch(`/api/discover/search?q=${encodeURIComponent(q)}`);
-      const data = await readJson<{
+      const data = (await res.json()) as {
         tracks?: GlobalSearchTrack[];
         youtubeMatches?: YoutubeMatchItem[];
         soundcloudTracks?: GlobalSearchTrack[];
         soundcloudArtists?: SoundCloudArtistProfile[];
         error?: string;
-      }>(res);
+      };
       if (!res.ok) throw new Error(data.error || 'Global search failed');
       const tracks = data.tracks || [];
       setGlobalTracks(tracks);
@@ -201,7 +372,7 @@ export function DiscoverTab({
     setArtistTracks([]);
     try {
       const res = await fetch(`/api/discover/soundcloud-artist?id=${artist.id}`);
-      const data = await readJson<{ tracks?: GlobalSearchTrack[] }>(res);
+      const data = (await res.json()) as { tracks?: GlobalSearchTrack[] };
       setArtistTracks(data.tracks || []);
     } catch {
       setArtistTracks([]);
@@ -438,23 +609,51 @@ export function DiscoverTab({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-400">Export Format:</span>
+        <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1 p-1 rounded-lg bg-[#0B0D10] border border-[#232833]">
-            {(['wav', 'mp3', 'ogg', 'mp4'] as const).map((fmt) => (
-              <button
-                key={fmt}
-                type="button"
-                onClick={() => setExportFormat(fmt)}
-                className={`px-2.5 py-1 rounded text-xs font-mono uppercase transition-colors ${
-                  exportFormat === fmt
-                    ? 'bg-amber-500 text-slate-950 font-bold'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                .{fmt}
-              </button>
-            ))}
+            <button
+              type="button"
+              onClick={() => setDiscoverView('explore')}
+              className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                discoverView === 'explore'
+                  ? 'bg-amber-500 text-slate-950 font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Search &amp; Explore
+            </button>
+            <button
+              type="button"
+              onClick={() => setDiscoverView('offlineLibrary')}
+              className={`px-3 py-1.5 rounded text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                discoverView === 'offlineLibrary'
+                  ? 'bg-amber-500 text-slate-950 font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Offline Library ({offlineLibrary.length})</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400">Format:</span>
+            <div className="flex items-center gap-1 p-1 rounded-lg bg-[#0B0D10] border border-[#232833]">
+              {(['wav', 'mp3', 'ogg', 'mp4'] as const).map((fmt) => (
+                <button
+                  key={fmt}
+                  type="button"
+                  onClick={() => setExportFormat(fmt)}
+                  className={`px-2.5 py-1 rounded text-xs font-mono uppercase transition-colors ${
+                    exportFormat === fmt
+                      ? 'bg-amber-500 text-slate-950 font-bold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  .{fmt}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -486,7 +685,208 @@ export function DiscoverTab({
         </div>
       )}
 
-      {/* 1. Global Song Search Bar */}
+      {discoverView === 'offlineLibrary' ? (() => {
+        const filteredOffline = offlineFilter.trim()
+          ? offlineLibrary.filter((s) => {
+              const q = offlineFilter.trim().toLowerCase();
+              return s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q);
+            })
+          : offlineLibrary;
+
+        const isPlayingOfflineQueue = persistentPlayer?.queueLabel === 'Offline Library';
+        const activeOfflineIdx = isPlayingOfflineQueue ? (persistentPlayer?.queueIndex ?? -1) : -1;
+        const upNextSong =
+          isPlayingOfflineQueue &&
+          activeOfflineIdx >= 0 &&
+          filteredOffline.length > 1 &&
+          activeOfflineIdx + 1 < filteredOffline.length
+            ? filteredOffline[activeOfflineIdx + 1]
+            : null;
+
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div>
+                <h3 className="font-display text-lg font-semibold text-slate-100 flex items-center gap-2">
+                  <span>Offline Library ({offlineLibrary.length} Songs)</span>
+                  {offlineLibrary.length > 1 && (
+                    <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/35 text-[11px] font-mono text-emerald-300">
+                      Auto-Next Queue
+                    </span>
+                  )}
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Plays continuously like Spotify &amp; Boomplay — when one song finishes, it automatically plays the next song in your library.
+                </p>
+              </div>
+
+              {offlineLibrary.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={offlineFilter}
+                      onChange={(e) => setOfflineFilter(e.target.value)}
+                      placeholder="Filter offline songs..."
+                      className="pl-8 pr-3 py-1.5 rounded-lg bg-[#0B0D10] border border-[#232833] text-xs text-slate-100 focus:outline-none focus:border-amber-500 w-44"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handlePlayOfflineTrackAt(0, filteredOffline)}
+                    disabled={filteredOffline.length === 0}
+                    className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    <span>Play All</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearOfflineLibrary}
+                    className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-xs font-medium border border-red-500/40"
+                  >
+                    Clear Library
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {isPlayingOfflineQueue && persistentPlayer && (
+              <div className="rounded-xl bg-[#13161B] border border-emerald-500/40 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <ListMusic className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div className="text-xs text-slate-200 truncate">
+                    <span className="text-emerald-400 font-semibold">Now Playing:</span>{' '}
+                    {persistentPlayer.track.title} — {persistentPlayer.track.artist}
+                  </div>
+                </div>
+                {upNextSong ? (
+                  <button
+                    type="button"
+                    onClick={() => handlePlayOfflineTrackAt(activeOfflineIdx + 1, filteredOffline)}
+                    className="text-xs font-mono text-amber-300 hover:text-amber-200 flex items-center gap-1.5 shrink-0"
+                  >
+                    <SkipForward className="w-3.5 h-3.5" />
+                    <span>Up Next: {upNextSong.title}</span>
+                  </button>
+                ) : (
+                  <span className="text-[11px] font-mono text-slate-500">
+                    End of Offline Library queue (toggle Repeat on player to loop)
+                  </span>
+                )}
+              </div>
+            )}
+
+            {offlineLibrary.length === 0 ? (
+              <div className="rounded-xl bg-[#13161B] border border-[#232833] p-12 text-center space-y-3">
+                <Download className="w-10 h-10 text-slate-600 mx-auto" />
+                <div className="text-sm font-semibold text-slate-300">Your Offline Library is Empty</div>
+                <p className="text-xs text-slate-500 max-w-md mx-auto">
+                  Search any song in the "Search &amp; Explore" tab and click <strong className="text-amber-400">Download Full Song</strong> to save songs for continuous offline playback.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {filteredOffline.map((song, idx) => {
+                  const isSelected = persistentPlayer?.track.id === song.id;
+                  const isUpNext = upNextSong?.id === song.id;
+                  return (
+                    <div
+                      key={song.id}
+                      className={`rounded-xl border p-4 flex flex-col justify-between gap-3 transition-colors ${
+                        isSelected
+                          ? 'bg-[#171C24] border-emerald-500/70'
+                          : isUpNext
+                          ? 'bg-[#151921] border-amber-500/45'
+                          : 'bg-[#13161B] border-[#232833]'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="w-14 h-14 rounded-lg bg-[#0B0D10] border border-[#232833] overflow-hidden shrink-0 flex items-center justify-center relative">
+                          {song.coverUrl ? (
+                            <img
+                              src={song.coverUrl}
+                              alt={song.title}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover"
+                              onError={(e) => {
+                                e.currentTarget.style.display = 'none';
+                              }}
+                            />
+                          ) : (
+                            <Music2 className="w-5 h-5 text-amber-400" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <h4 className="font-display text-sm font-semibold text-slate-100 truncate">
+                              {song.title}
+                            </h4>
+                            {isSelected ? (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono shrink-0">
+                                PLAYING
+                              </span>
+                            ) : isUpNext ? (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono shrink-0">
+                                UP NEXT
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-mono text-slate-500 shrink-0 tabular-nums">
+                                #{idx + 1}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-300 truncate">{song.artist}</p>
+                          <div className="text-[11px] font-mono text-slate-500 mt-1 flex items-center gap-2">
+                            <span>{formatDurationSec(song.durationSec)}</span>
+                            <span>· {song.hasLocalBlob ? 'Offline Cached' : song.downloadedAt}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-2 border-t border-[#232833]">
+                        <button
+                          type="button"
+                          onClick={() => handlePlayOfflineTrackAt(idx, filteredOffline)}
+                          className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+                            isSelected
+                              ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                              : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                          }`}
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          <span>{isSelected ? 'Playing Now' : 'Play Offline'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadFullSongToDeviceAndLibrary(song)}
+                          title="Download file to device again"
+                          className="py-1.5 px-3 rounded-lg bg-[#1B2028] hover:bg-[#252B36] text-slate-200 text-xs font-medium border border-[#2A313E]"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveOfflineSong(song.id)}
+                          title="Remove from offline library"
+                          className="py-1.5 px-3 rounded-lg bg-red-950/40 hover:bg-red-900/40 text-red-300 text-xs font-medium border border-red-800/50"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })() : (
+        <>
+          {/* 1. Global Song Search Bar */}
       <div className="rounded-xl bg-[#13161B] border border-[#232833] p-5 space-y-4">
         <form
           onSubmit={(e) => {
@@ -633,119 +1033,140 @@ export function DiscoverTab({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {(sourceFilter === 'soundcloud'
-              ? soundcloudTracks
-              : sourceFilter === 'catalog'
-              ? globalTracks.filter((t) => t.source !== 'soundcloud')
-              : globalTracks
-            ).map((track) => {
-              const isSelected = persistentPlayer?.track.id === track.id;
-              const isPreviewActive = isSelected && persistentPlayer?.mode === 'preview';
-              const isFullActive = isSelected && persistentPlayer?.mode === 'full';
-              return (
-                <div
-                  key={track.id}
-                  className={`rounded-xl bg-[#13161B] border p-3.5 flex flex-col justify-between gap-3 transition-colors ${
-                    isSelected ? 'border-amber-500/60 bg-[#171C24]' : 'border-[#232833]'
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="w-14 h-14 rounded-lg bg-[#0B0D10] border border-[#232833] overflow-hidden shrink-0 flex items-center justify-center">
-                      {track.coverUrl ? (
-                        <img
-                          src={track.coverUrl}
-                          alt={track.title}
-                          referrerPolicy="no-referrer"
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            e.currentTarget.style.display = 'none';
-                          }}
-                        />
-                      ) : (
-                        <Music2 className="w-5 h-5 text-amber-400" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <h4 className="font-display text-sm font-semibold text-slate-100 truncate">
-                        {track.title}
-                      </h4>
-                      <p className="text-xs text-slate-300 truncate">{track.artist}</p>
-                      <div className="text-[11px] font-mono text-slate-500 mt-1 flex items-center gap-2 tabular-nums">
-                        <span className={track.source === 'soundcloud' ? 'uppercase text-amber-400' : 'uppercase'}>
-                          {track.source}
-                        </span>
-                        {track.durationSec > 0 && <span>· {formatDurationSec(track.durationSec)}</span>}
-                        {typeof track.playbackCount === 'number' && track.playbackCount > 0 && (
-                          <span>· {track.playbackCount.toLocaleString()} plays</span>
+            {(() => {
+              const displayedSearchTracks =
+                sourceFilter === 'soundcloud'
+                  ? soundcloudTracks
+                  : sourceFilter === 'catalog'
+                  ? globalTracks.filter((t) => t.source !== 'soundcloud')
+                  : globalTracks;
+
+              return displayedSearchTracks.map((track, trackIdx) => {
+                const isSelected = persistentPlayer?.track.id === track.id;
+                const isPreviewActive = isSelected && persistentPlayer?.mode === 'preview';
+                const isFullActive = isSelected && persistentPlayer?.mode === 'full';
+                const searchQueueCtx = {
+                  queue: displayedSearchTracks,
+                  queueIndex: trackIdx,
+                  queueLabel: 'Global Search',
+                };
+                return (
+                  <div
+                    key={track.id}
+                    className={`rounded-xl bg-[#13161B] border p-3.5 flex flex-col justify-between gap-3 transition-colors ${
+                      isSelected ? 'border-amber-500/60 bg-[#171C24]' : 'border-[#232833]'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="w-14 h-14 rounded-lg bg-[#0B0D10] border border-[#232833] overflow-hidden shrink-0 flex items-center justify-center">
+                        {track.coverUrl ? (
+                          <img
+                            src={track.coverUrl}
+                            alt={track.title}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <Music2 className="w-5 h-5 text-amber-400" />
                         )}
                       </div>
+                      <div className="min-w-0 flex-1">
+                        <h4 className="font-display text-sm font-semibold text-slate-100 truncate">
+                          {track.title}
+                        </h4>
+                        <p className="text-xs text-slate-300 truncate">{track.artist}</p>
+                        <div className="text-[11px] font-mono text-slate-500 mt-1 flex items-center gap-2 tabular-nums">
+                          <span className={track.source === 'soundcloud' ? 'uppercase text-amber-400' : 'uppercase'}>
+                            {track.source}
+                          </span>
+                          {track.durationSec > 0 && <span>· {formatDurationSec(track.durationSec)}</span>}
+                          {typeof track.playbackCount === 'number' && track.playbackCount > 0 && (
+                            <span>· {track.playbackCount.toLocaleString()} plays</span>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="flex items-center gap-2">
-                    {track.previewUrl && (
+                    <div className="flex items-center gap-2">
+                      {track.previewUrl && (
+                        <button
+                          type="button"
+                          onClick={() => onPlayGlobalTrack(track, 'preview', cachedYtMatches, searchQueueCtx)}
+                          className={`flex-1 py-1.5 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                            isPreviewActive
+                              ? 'bg-amber-400 text-slate-950 ring-2 ring-amber-300/40'
+                              : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                          }`}
+                        >
+                          <Play className="w-3 h-3" />
+                          <span>Preview</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
-                        onClick={() => onPlayGlobalTrack(track, 'preview', cachedYtMatches)}
-                        className={`flex-1 py-1.5 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                          isPreviewActive
-                            ? 'bg-amber-400 text-slate-950 ring-2 ring-amber-300/40'
-                            : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                        onClick={() => onPlayGlobalTrack(track, 'full', cachedYtMatches, searchQueueCtx)}
+                        className={`flex-1 py-1.5 px-2.5 rounded-lg text-xs font-semibold border flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                          isFullActive
+                            ? 'bg-emerald-500 text-slate-950 border-emerald-400'
+                            : 'bg-[#1B2028] hover:bg-[#252B36] text-emerald-300 border-emerald-500/40'
                         }`}
                       >
-                        <Play className="w-3 h-3" />
-                        <span>Preview</span>
+                        <Radio className="w-3 h-3" />
+                        <span>{track.source === 'soundcloud' ? 'SoundCloud' : 'Full Song'}</span>
                       </button>
-                    )}
 
-                    <button
-                      type="button"
-                      onClick={() => onPlayGlobalTrack(track, 'full', cachedYtMatches)}
-                      className={`flex-1 py-1.5 px-2.5 rounded-lg text-xs font-semibold border flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                        isFullActive
-                          ? 'bg-emerald-500 text-slate-950 border-emerald-400'
-                          : 'bg-[#1B2028] hover:bg-[#252B36] text-emerald-300 border-emerald-500/40'
-                      }`}
-                    >
-                      <Radio className="w-3 h-3" />
-                      <span>{track.source === 'soundcloud' ? 'SoundCloud' : 'Full Song'}</span>
-                    </button>
-
-                    {track.source !== 'soundcloud' && track.soundcloudPermalink && (
                       <button
                         type="button"
-                        onClick={() =>
-                          onPlayGlobalTrack(
-                            {
-                              ...track,
-                              id: `sc_alt_${track.id}`,
-                              source: 'soundcloud',
-                            },
-                            'full',
-                            cachedYtMatches
-                          )
-                        }
-                        title="Play matching SoundCloud stream"
-                        className="py-1.5 px-2.5 rounded-lg bg-[#0B0D10] hover:bg-[#1B2028] border border-amber-500/35 text-amber-400 text-[11px] font-mono font-semibold"
+                        onClick={() => handleDownloadFullSongToDeviceAndLibrary(track)}
+                        disabled={exportingId === track.id}
+                        className="py-1.5 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap shadow-sm"
+                        title="Download full song to device and save to offline library"
                       >
-                        SC
+                        <Download className="w-3.5 h-3.5" />
+                        <span>{exportingId === track.id ? 'Downloading...' : 'Download Full Song'}</span>
                       </button>
-                    )}
 
-                    {(track.previewUrl || track.fullAudioUrl) && (
-                      <button
-                        type="button"
-                        onClick={() => handleLoadPreviewIntoSampler(track)}
-                        title="Load preview audio into Converter & Beat Pads"
-                        className="py-1.5 px-2.5 rounded-lg bg-[#0B0D10] hover:bg-[#1B2028] border border-[#232833] text-slate-300 text-xs flex items-center justify-center"
-                      >
-                        <Sliders className="w-3.5 h-3.5 text-amber-400" />
-                      </button>
-                    )}
+                      {track.source !== 'soundcloud' && track.soundcloudPermalink && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onPlayGlobalTrack(
+                              {
+                                ...track,
+                                id: `sc_alt_${track.id}`,
+                                source: 'soundcloud',
+                              },
+                              'full',
+                              cachedYtMatches,
+                              searchQueueCtx
+                            )
+                          }
+                          title="Play matching SoundCloud stream"
+                          className="py-1.5 px-2.5 rounded-lg bg-[#0B0D10] hover:bg-[#1B2028] border border-amber-500/35 text-amber-400 text-[11px] font-mono font-semibold"
+                        >
+                          SC
+                        </button>
+                      )}
+
+                      {(track.previewUrl || track.fullAudioUrl) && (
+                        <button
+                          type="button"
+                          onClick={() => handleLoadPreviewIntoSampler(track)}
+                          title="Load preview audio into Converter & Beat Pads"
+                          className="py-1.5 px-2.5 rounded-lg bg-[#0B0D10] hover:bg-[#1B2028] border border-[#232833] text-slate-300 text-xs flex items-center justify-center"
+                        >
+                          <Sliders className="w-3.5 h-3.5 text-amber-400" />
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              });
+            })()}
           </div>
         </div>
       )}
@@ -856,7 +1277,7 @@ export function DiscoverTab({
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                  {artistTracks.map((trk) => {
+                  {artistTracks.map((trk, artIdx) => {
                     const isActive = persistentPlayer?.track.id === trk.id;
                     return (
                       <div
@@ -880,7 +1301,13 @@ export function DiscoverTab({
                         </div>
                         <button
                           type="button"
-                          onClick={() => onPlayGlobalTrack(trk, 'full')}
+                          onClick={() =>
+                            onPlayGlobalTrack(trk, 'full', undefined, {
+                              queue: artistTracks,
+                              queueIndex: artIdx,
+                              queueLabel: selectedArtist.username,
+                            })
+                          }
                           className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-semibold flex items-center gap-1 shrink-0"
                         >
                           <Play className="w-3 h-3" />
@@ -1191,17 +1618,35 @@ export function DiscoverTab({
                     <button
                       type="button"
                       onClick={() =>
+                        handleDownloadFullSongToDeviceAndLibrary({
+                          id: track.id,
+                          title: track.title,
+                          artist: track.artist,
+                          genre: track.genre,
+                          durationSec: 180,
+                          coverUrl: track.coverUrl,
+                          source: 'catalog',
+                        })
+                      }
+                      disabled={exportingId === track.id}
+                      className="flex-1 py-2 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap shadow-sm"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>
+                        {exportingId === track.id ? 'Downloading...' : 'Download Full Song'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
                         handleDownloadTrack(track.id, track.title, track.grooveStyle, track.bpm)
                       }
                       disabled={exportingId === track.id}
-                      className="flex-1 py-2 px-3 rounded-lg bg-[#1B2028] hover:bg-[#252B36] text-slate-100 text-xs font-medium border border-[#2A313E] flex items-center justify-center gap-1.5 whitespace-nowrap"
+                      className="py-2 px-2.5 rounded-lg bg-[#1B2028] hover:bg-[#252B36] text-slate-100 text-xs font-medium border border-[#2A313E] flex items-center justify-center gap-1"
+                      title="Export format"
                     >
-                      <Download className="w-3.5 h-3.5 text-amber-400" />
-                      <span>
-                        {exportingId === track.id
-                          ? 'Rendering...'
-                          : `Save .${exportFormat.toUpperCase()}`}
-                      </span>
+                      <span>.{exportFormat.toUpperCase()}</span>
                     </button>
 
                     <button
@@ -1225,6 +1670,8 @@ export function DiscoverTab({
           })}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

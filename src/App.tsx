@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { CupSoda, UserCircle2, Music, Disc3, Box, Clock4 } from 'lucide-react';
 import {
@@ -33,23 +33,37 @@ import {
   encodeAudioBufferSliceToBase64Wav,
   decodeBase64WavToBuffer,
 } from './audio/studioAudio';
-import { type DiscoverCatalogTrack } from './audio/discoverCatalog';
+import { DISCOVER_CATALOG_TRACKS, type DiscoverCatalogTrack } from './audio/discoverCatalog';
+import { getOfflineAudioBlob } from './audio/offlineLibraryDb';
 import {
   type GlobalSearchTrack,
   type YoutubeMatchItem,
   type PersistentPlayerState,
+  type RepeatMode,
 } from './types/discoverPlayer';
-import { SplashScreen } from './components/SplashScreen';
 import { AuthModal } from './components/AuthModal';
 import { BuyMeSodaModal } from './components/BuyMeSodaModal';
-import { SocialHubTab } from './components/tabs/SocialHubTab';
+import { PWAInstallButton, PWAInstallBanner } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { MusicCreationTab } from './components/tabs/MusicCreationTab';
-import { DawTab } from './components/tabs/DawTab';
-import { VirtualDjTab } from './components/tabs/VirtualDjTab';
-import { DiscoverTab } from './components/tabs/DiscoverTab';
-import { StudioStage3D } from './components/StudioStage3D';
 import { StudioChatBot } from './components/StudioChatBot';
 import { PersistentAudioPlayer } from './components/PersistentAudioPlayer';
+
+const SocialHubTab = lazy(() =>
+  import('./components/tabs/SocialHubTab').then((m) => ({ default: m.SocialHubTab }))
+);
+const DawTab = lazy(() =>
+  import('./components/tabs/DawTab').then((m) => ({ default: m.DawTab }))
+);
+const VirtualDjTab = lazy(() =>
+  import('./components/tabs/VirtualDjTab').then((m) => ({ default: m.VirtualDjTab }))
+);
+const DiscoverTab = lazy(() =>
+  import('./components/tabs/DiscoverTab').then((m) => ({ default: m.DiscoverTab }))
+);
+const StudioStage3D = lazy(() =>
+  import('./components/StudioStage3D').then((m) => ({ default: m.StudioStage3D }))
+);
 
 type TabId = 'social' | 'creation' | 'daw' | 'vdj' | 'discover';
 
@@ -64,7 +78,6 @@ const TABS: { id: TabId; label: string }[] = [
 const HERO_IMG = '/src/assets/images/studio_hero_backdrop_1794573516682.jpg';
 
 export default function App() {
-  const [showSplash, setShowSplash] = useState(true);
   const [activeTab, setActiveTab] = useState<TabId>('creation');
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [sodaModalOpen, setSodaModalOpen] = useState(false);
@@ -101,6 +114,8 @@ export default function App() {
   const [tapCount, setTapCount] = useState(0);
   const [tapFlash, setTapFlash] = useState(false);
   const [persistentPlayer, setPersistentPlayer] = useState<PersistentPlayerState | null>(null);
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
+  const [shuffleOn, setShuffleOn] = useState(false);
   const [playerCurrentTime, setPlayerCurrentTime] = useState(0);
   const [playerDuration, setPlayerDuration] = useState(30);
   const [playerIsPlaying, setPlayerIsPlaying] = useState(false);
@@ -108,20 +123,48 @@ export default function App() {
   const tapTimestampsRef = useRef<number[]>([]);
   const tapResetTimerRef = useRef<number | null>(null);
   const catalogBlobUrlRef = useRef<string | null>(null);
+  const offlineBlobUrlRef = useRef<string | null>(null);
+  const persistentPlayerRef = useRef<PersistentPlayerState | null>(null);
+  const repeatModeRef = useRef<RepeatMode>('off');
+  const shuffleOnRef = useRef<boolean>(false);
+  const playNonceCounterRef = useRef(1);
   studioBpmRef.current = studioBpm;
+  persistentPlayerRef.current = persistentPlayer;
+  repeatModeRef.current = repeatMode;
+  shuffleOnRef.current = shuffleOn;
 
   useEffect(() => {
     return () => {
       if (catalogBlobUrlRef.current) {
         URL.revokeObjectURL(catalogBlobUrlRef.current);
       }
+      if (offlineBlobUrlRef.current) {
+        URL.revokeObjectURL(offlineBlobUrlRef.current);
+      }
     };
   }, []);
 
+  type QueueContextArg = {
+    queue: GlobalSearchTrack[];
+    queueIndex: number;
+    queueLabel?: string;
+    playNonce?: number;
+  };
+
   const resolveAndPlayFullStream = async (
     track: GlobalSearchTrack,
-    cachedVersions?: YoutubeMatchItem[]
+    cachedVersions?: YoutubeMatchItem[],
+    queueContext?: QueueContextArg
   ) => {
+    const queueFields = queueContext
+      ? {
+          queue: queueContext.queue,
+          queueIndex: queueContext.queueIndex,
+          queueLabel: queueContext.queueLabel,
+          playNonce: queueContext.playNonce ?? playNonceCounterRef.current,
+        }
+      : { playNonce: playNonceCounterRef.current };
+
     if (track.source === 'soundcloud' && track.soundcloudPermalink) {
       setPersistentPlayer({
         track,
@@ -130,6 +173,7 @@ export default function App() {
         activeYoutubeVideoId: null,
         activeSoundCloudPermalink: track.soundcloudPermalink,
         loadingFullStream: Boolean(track.soundcloudTrackId),
+        ...queueFields,
       });
 
       if (track.soundcloudTrackId) {
@@ -169,6 +213,7 @@ export default function App() {
         activeYoutubeVideoId: track.youtubeVideoId,
         activeSoundCloudPermalink: null,
         loadingFullStream: false,
+        ...queueFields,
       });
       return;
     }
@@ -180,6 +225,7 @@ export default function App() {
       activeYoutubeVideoId: cachedVersions?.[0]?.videoId || null,
       activeSoundCloudPermalink: null,
       loadingFullStream: true,
+      ...queueFields,
     });
 
     try {
@@ -204,15 +250,48 @@ export default function App() {
     }
   };
 
-  const handlePlayDiscoverTrack = (
-    track: GlobalSearchTrack,
+  const handlePlayDiscoverTrack = async (
+    rawTrack: GlobalSearchTrack,
     requestedMode: 'preview' | 'full',
-    cachedVersions?: YoutubeMatchItem[]
+    cachedVersions?: YoutubeMatchItem[],
+    queueContext?: QueueContextArg
   ) => {
+    const nextNonce = queueContext?.playNonce ?? ++playNonceCounterRef.current;
+    let track = rawTrack;
+
+    // Prefer cached offline IndexedDB audio Blob when playing from Offline Library or without URL
+    if (
+      queueContext?.queueLabel === 'Offline Library' ||
+      (!track.fullAudioUrl && !track.previewUrl && !track.youtubeVideoId && !track.soundcloudPermalink)
+    ) {
+      const cachedBlob = await getOfflineAudioBlob(track.id);
+      if (cachedBlob) {
+        if (offlineBlobUrlRef.current) {
+          URL.revokeObjectURL(offlineBlobUrlRef.current);
+        }
+        const blobUrl = URL.createObjectURL(cachedBlob);
+        offlineBlobUrlRef.current = blobUrl;
+        track = {
+          ...track,
+          fullAudioUrl: blobUrl,
+          previewUrl: track.previewUrl || blobUrl,
+        };
+      }
+    }
+
     const effectiveMode: 'preview' | 'full' =
       requestedMode === 'preview' && !track.previewUrl && !track.fullAudioUrl
         ? 'full'
         : requestedMode;
+
+    const queueFields = queueContext
+      ? {
+          queue: queueContext.queue,
+          queueIndex: queueContext.queueIndex,
+          queueLabel: queueContext.queueLabel,
+          playNonce: nextNonce,
+        }
+      : { playNonce: nextNonce };
 
     if (effectiveMode === 'preview' || track.fullAudioUrl) {
       setPersistentPlayer({
@@ -222,14 +301,24 @@ export default function App() {
         activeYoutubeVideoId: track.youtubeVideoId || cachedVersions?.[0]?.videoId || null,
         activeSoundCloudPermalink: null,
         loadingFullStream: false,
+        ...queueFields,
       });
       return;
     }
 
-    resolveAndPlayFullStream(track, cachedVersions);
+    resolveAndPlayFullStream(track, cachedVersions, {
+      queue: queueContext?.queue || [track],
+      queueIndex: queueContext?.queueIndex ?? 0,
+      queueLabel: queueContext?.queueLabel,
+      playNonce: nextNonce,
+    });
   };
 
-  const handlePlayCatalogTrack = async (catalogTrack: DiscoverCatalogTrack) => {
+  const handlePlayCatalogTrack = async (
+    catalogTrack: DiscoverCatalogTrack,
+    queueContext?: QueueContextArg
+  ) => {
+    const nextNonce = queueContext?.playNonce ?? ++playNonceCounterRef.current;
     const buf = await renderGrooveBuffer(catalogTrack.grooveStyle, catalogTrack.bpm, 4);
     const wavBlob = audioBufferToWavBlob(buf);
     if (catalogBlobUrlRef.current) {
@@ -251,13 +340,116 @@ export default function App() {
       score: 100,
     };
 
+    const defaultCatalogQueue: GlobalSearchTrack[] = DISCOVER_CATALOG_TRACKS.map((c) => ({
+      id: c.id,
+      title: c.title,
+      artist: c.artist,
+      album: `${c.genre} · ${c.bpm} BPM`,
+      genre: c.genre,
+      durationSec: 16,
+      coverUrl: c.coverUrl,
+      previewUrl: c.id === catalogTrack.id ? blobUrl : '',
+      source: 'catalog',
+      score: 100,
+    }));
+    const defaultIndex = DISCOVER_CATALOG_TRACKS.findIndex((c) => c.id === catalogTrack.id);
+
     setPersistentPlayer({
       track: syntheticTrack,
       mode: 'preview',
       youtubeVersions: [],
       activeYoutubeVideoId: null,
       loadingFullStream: false,
+      queue: queueContext?.queue || defaultCatalogQueue,
+      queueIndex: queueContext?.queueIndex ?? (defaultIndex >= 0 ? defaultIndex : 0),
+      queueLabel: queueContext?.queueLabel || 'Creator Releases',
+      playNonce: nextNonce,
     });
+  };
+
+  const playQueueTrackAtIndex = (nextIndex: number) => {
+    const current = persistentPlayerRef.current;
+    if (!current?.queue || nextIndex < 0 || nextIndex >= current.queue.length) return;
+    const target = current.queue[nextIndex];
+    const nextNonce = ++playNonceCounterRef.current;
+    const queueCtx: QueueContextArg = {
+      queue: current.queue,
+      queueIndex: nextIndex,
+      queueLabel: current.queueLabel,
+      playNonce: nextNonce,
+    };
+
+    if (target.source === 'catalog') {
+      const cat = DISCOVER_CATALOG_TRACKS.find((c) => c.id === target.id);
+      if (cat) {
+        handlePlayCatalogTrack(cat, queueCtx);
+        return;
+      }
+    }
+
+    handlePlayDiscoverTrack(
+      target,
+      current.queueLabel === 'Offline Library' ? 'full' : current.mode,
+      undefined,
+      queueCtx
+    );
+  };
+
+  const handleNextTrack = (isAutoAdvance = false) => {
+    const current = persistentPlayerRef.current;
+    if (!current) return;
+    const queue = current.queue || [];
+    const currentIndex = current.queueIndex ?? 0;
+    const activeRepeat = repeatModeRef.current;
+    const isShuffle = shuffleOnRef.current;
+
+    if (isAutoAdvance && activeRepeat === 'one') {
+      const replayNonce = ++playNonceCounterRef.current;
+      setPersistentPlayer((prev) => (prev ? { ...prev, playNonce: replayNonce } : prev));
+      return;
+    }
+
+    if (queue.length === 0) return;
+
+    if (queue.length === 1) {
+      if (activeRepeat === 'all' || activeRepeat === 'one') {
+        const replayNonce = ++playNonceCounterRef.current;
+        setPersistentPlayer((prev) => (prev ? { ...prev, playNonce: replayNonce } : prev));
+      }
+      return;
+    }
+
+    let nextIdx: number | null = null;
+    if (isShuffle) {
+      const candidates = queue
+        .map((_, idx) => idx)
+        .filter((idx) => idx !== currentIndex);
+      if (candidates.length > 0) {
+        nextIdx = candidates[Math.floor(Math.random() * candidates.length)];
+      }
+    } else if (currentIndex + 1 < queue.length) {
+      nextIdx = currentIndex + 1;
+    } else if (activeRepeat === 'all') {
+      nextIdx = 0;
+    }
+
+    if (nextIdx !== null) {
+      playQueueTrackAtIndex(nextIdx);
+    }
+  };
+
+  const handlePreviousTrack = () => {
+    const current = persistentPlayerRef.current;
+    if (!current?.queue || current.queue.length === 0) return;
+    const currentIndex = current.queueIndex ?? 0;
+    if (currentIndex > 0) {
+      playQueueTrackAtIndex(currentIndex - 1);
+    } else if (repeatModeRef.current === 'all') {
+      playQueueTrackAtIndex(current.queue.length - 1);
+    } else {
+      const replayNonce = ++playNonceCounterRef.current;
+      setPersistentPlayer((prev) => (prev ? { ...prev, playNonce: replayNonce } : prev));
+    }
   };
 
   const handleTapTempo = () => {
@@ -533,21 +725,25 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B0D10] text-slate-100 flex flex-col">
-      {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
 
       {/* 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-30 bg-[#0B0D10]/95 backdrop-blur-md border-b border-[#232833]">
         <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-8">
-          {/* Zone 1: Single text wordmark */}
+          {/* Zone 1: Brand logo & wordmark */}
           <a
             href="#music-page"
             onClick={(e) => {
               e.preventDefault();
               setActiveTab('creation');
             }}
-            className="font-display text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
+            className="flex items-center gap-2.5 font-display text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
           >
-            SoundDeck Studio
+            <img
+              src="/app-logo.png"
+              alt="SoundDeck Studio logo"
+              className="w-8 h-8 rounded-lg object-cover border border-purple-500/40 shadow-sm"
+            />
+            <span>SoundDeck Studio</span>
           </a>
 
           {/* Zone 2: 5 concise single-line workspace tabs */}
@@ -649,6 +845,8 @@ export default function App() {
                   : 'Register / Sign In'}
               </span>
             </button>
+
+            <PWAInstallButton />
           </div>
         </div>
 
@@ -676,6 +874,7 @@ export default function App() {
 
       {/* Main Music Page Workspace */}
       <main id="music-page" className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
+        <PWAInstallBanner />
         {/* Studio Hero & BuymeSoda Support Strip */}
         <section className="relative rounded-xl overflow-hidden border border-[#232833] bg-[#13161B]">
           <div className="grid grid-cols-1 lg:grid-cols-12 items-stretch">
@@ -746,74 +945,85 @@ export default function App() {
 
         {/* Active Workspace Tab Viewport */}
         <section aria-live="polite">
-          {activeTab === 'social' && (
-            <SocialHubTab
-              user={user}
-              privateInfo={privateInfo}
-              campaigns={campaigns}
-              activeTrackTitle={activeTrackTitle}
-              studioBpm={studioBpm}
-              onOpenAuth={() => setAuthModalOpen(true)}
-              onPrivateInfoSaved={() => user && refreshProfileData(user.uid)}
-              onSupportCreator={(recipientName) =>
-                openSodaSupport(
-                  recipientName
-                    ? {
-                        handle: recipientName,
-                        name: recipientName,
-                        role: profile?.role || 'creator',
-                      }
-                    : undefined
-                )
-              }
-            />
-          )}
+          <Suspense
+            fallback={
+              <div className="rounded-xl bg-[#13161B] border border-[#232833] p-8 text-center text-sm text-slate-400">
+                Loading studio workspace...
+              </div>
+            }
+          >
+            {activeTab === 'social' && (
+              <SocialHubTab
+                user={user}
+                profile={profile}
+                privateInfo={privateInfo}
+                campaigns={campaigns}
+                projects={projects}
+                creators={creators}
+                activeTrackTitle={activeTrackTitle}
+                studioBpm={studioBpm}
+                onOpenAuth={() => setAuthModalOpen(true)}
+                onPrivateInfoSaved={() => user && refreshProfileData(user.uid)}
+                onSupportCreator={(recipientName) =>
+                  openSodaSupport(
+                    recipientName
+                      ? {
+                          handle: recipientName,
+                          name: recipientName,
+                          role: profile?.role || 'creator',
+                        }
+                      : undefined
+                  )
+                }
+              />
+            )}
 
-          {activeTab === 'creation' && (
-            <MusicCreationTab
-              user={user}
-              projects={projects}
-              padAssignments={padAssignments}
-              padSampleBuffers={padSampleBuffers}
-              discoverCustomSamples={discoverCustomSamples}
-              onAssignSampleToPad={handleAssignSampleToPad}
-              onRemovePadAssignment={handleRemovePadAssignment}
-              onOpenAuth={() => setAuthModalOpen(true)}
-              onActiveTrackChange={(t) => setActiveTrackTitle(t)}
-              initialBpm={studioBpm}
-              onBpmChange={(nextBpm) => setStudioBpm(nextBpm)}
-              onOpen3DStage={() => setStage3DOpen(true)}
-            />
-          )}
+            {activeTab === 'creation' && (
+              <MusicCreationTab
+                user={user}
+                projects={projects}
+                padAssignments={padAssignments}
+                padSampleBuffers={padSampleBuffers}
+                discoverCustomSamples={discoverCustomSamples}
+                onAssignSampleToPad={handleAssignSampleToPad}
+                onRemovePadAssignment={handleRemovePadAssignment}
+                onOpenAuth={() => setAuthModalOpen(true)}
+                onActiveTrackChange={(t) => setActiveTrackTitle(t)}
+                initialBpm={studioBpm}
+                onBpmChange={(nextBpm) => setStudioBpm(nextBpm)}
+                onOpen3DStage={() => setStage3DOpen(true)}
+              />
+            )}
 
-          {activeTab === 'daw' && (
-            <DawTab initialBpm={studioBpm} initialBeatSignature={beatSignature} />
-          )}
+            {activeTab === 'daw' && (
+              <DawTab initialBpm={studioBpm} initialBeatSignature={beatSignature} />
+            )}
 
-          {activeTab === 'vdj' && <VirtualDjTab userRole={profile?.role} />}
+            {activeTab === 'vdj' && <VirtualDjTab userRole={profile?.role} />}
 
-          {activeTab === 'discover' && (
-            <DiscoverTab
-              user={user}
-              padAssignments={padAssignments}
-              persistentPlayer={persistentPlayer}
-              onPlayGlobalTrack={handlePlayDiscoverTrack}
-              onPlayCatalogTrack={handlePlayCatalogTrack}
-              onAssignSampleToPad={handleAssignSampleToPad}
-              onRegisterCustomSample={(sample) =>
-                setDiscoverCustomSamples((prev) => [
-                  sample,
-                  ...prev.filter((s) => s.id !== sample.id),
-                ])
-              }
-              onNavigateToCreation={() => setActiveTab('creation')}
-              onOpenAuth={() => setAuthModalOpen(true)}
-              onSupportCreator={(recipient) => openSodaSupport(recipient)}
-              currentTime={playerCurrentTime}
-              duration={playerDuration}
-              isPlaying={playerIsPlaying}
-            />
-          )}
+            {activeTab === 'discover' && (
+              <DiscoverTab
+                user={user}
+                padAssignments={padAssignments}
+                persistentPlayer={persistentPlayer}
+                onPlayGlobalTrack={handlePlayDiscoverTrack}
+                onPlayCatalogTrack={handlePlayCatalogTrack}
+                onAssignSampleToPad={handleAssignSampleToPad}
+                onRegisterCustomSample={(sample) =>
+                  setDiscoverCustomSamples((prev) => [
+                    sample,
+                    ...prev.filter((s) => s.id !== sample.id),
+                  ])
+                }
+                onNavigateToCreation={() => setActiveTab('creation')}
+                onOpenAuth={() => setAuthModalOpen(true)}
+                onSupportCreator={(recipient) => openSodaSupport(recipient)}
+                currentTime={playerCurrentTime}
+                duration={playerDuration}
+                isPlaying={playerIsPlaying}
+              />
+            )}
+          </Suspense>
         </section>
 
         {/* BuymeSoda Community & Owner Support Ledger */}
@@ -914,22 +1124,35 @@ export default function App() {
         }}
       />
 
-      <StudioStage3D
-        isOpen={stage3DOpen}
-        onClose={() => setStage3DOpen(false)}
-        activeTrackTitle={activeTrackTitle}
-        bpm={studioBpm}
-      />
+      {stage3DOpen && (
+        <Suspense fallback={null}>
+          <StudioStage3D
+            isOpen={stage3DOpen}
+            onClose={() => setStage3DOpen(false)}
+            activeTrackTitle={activeTrackTitle}
+            bpm={studioBpm}
+          />
+        </Suspense>
+      )}
 
       <PersistentAudioPlayer
         playerState={persistentPlayer}
         activeTab={activeTab}
+        repeatMode={repeatMode}
+        shuffleOn={shuffleOn}
         onSwitchMode={(nextMode) => {
           if (!persistentPlayer) return;
           handlePlayDiscoverTrack(
             persistentPlayer.track,
             nextMode,
-            persistentPlayer.youtubeVersions
+            persistentPlayer.youtubeVersions,
+            persistentPlayer.queue
+              ? {
+                  queue: persistentPlayer.queue,
+                  queueIndex: persistentPlayer.queueIndex ?? 0,
+                  queueLabel: persistentPlayer.queueLabel,
+                }
+              : undefined
           );
         }}
         onSelectYoutubeVersion={(videoId) =>
@@ -937,6 +1160,14 @@ export default function App() {
             prev ? { ...prev, activeYoutubeVideoId: videoId } : prev
           )
         }
+        onToggleRepeat={() =>
+          setRepeatMode((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'))
+        }
+        onToggleShuffle={() => setShuffleOn((prev) => !prev)}
+        onPrevious={handlePreviousTrack}
+        onNext={() => handleNextTrack(false)}
+        onEnded={() => handleNextTrack(true)}
+        onSelectQueueIndex={(idx) => playQueueTrackAtIndex(idx)}
         onOpenDiscover={() => setActiveTab('discover')}
         onClose={() => setPersistentPlayer(null)}
         onTimeUpdate={(t, d, p) => {
@@ -953,6 +1184,7 @@ export default function App() {
         hidden={stage3DOpen}
         hasFloatingPlayer={Boolean(persistentPlayer)}
       />
+      <OfflineIndicator />
     </div>
   );
 }

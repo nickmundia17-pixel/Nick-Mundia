@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Disc3, ArrowRight } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 
 interface SplashScreenProps {
   onComplete: () => void;
 }
 
-const VINYL_IMG = '/src/assets/images/dj_deck_vinyl_1794573516670.jpg';
+const APP_LOGO_IMG = '/app-logo.png';
 
 export function SplashScreen({ onComplete }: SplashScreenProps) {
   const [progress, setProgress] = useState(0);
@@ -46,22 +46,13 @@ export function SplashScreen({ onComplete }: SplashScreenProps) {
       aria-label="Loading SoundDeck Studio"
     >
       <div className="w-full max-w-md flex flex-col items-center text-center">
-        {/* Spinning Hardware Vinyl Platter */}
-        <div className="relative w-32 h-32 rounded-full overflow-hidden border border-amber-500/40 shadow-2xl shadow-amber-500/10 mb-8 bg-[#13161B] flex items-center justify-center">
+        {/* SoundDeck Studio App Logo */}
+        <div className="relative w-32 h-32 rounded-3xl overflow-hidden border border-purple-500/40 shadow-2xl shadow-purple-500/20 mb-8 bg-[#101226] flex items-center justify-center">
           <img
-            src={VINYL_IMG}
-            alt="SoundDeck Studio turntable platter"
-            referrerPolicy="no-referrer"
-            className="w-full h-full object-cover animate-vinyl"
-            onError={(e) => {
-              e.currentTarget.style.display = 'none';
-            }}
+            src={APP_LOGO_IMG}
+            alt="SoundDeck Studio app logo"
+            className="w-full h-full object-cover"
           />
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="w-8 h-8 rounded-full bg-[#0B0D10] border border-amber-400/60 flex items-center justify-center">
-              <Disc3 className="w-4 h-4 text-amber-400" />
-            </div>
-          </div>
         </div>
 
         <h1 className="font-display text-3xl font-bold tracking-tight text-slate-100 mb-2">

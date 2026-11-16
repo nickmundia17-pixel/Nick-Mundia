@@ -18,6 +18,26 @@ export interface GlobalSearchTrack {
   score: number;
 }
 
+export interface OfflineLibraryTrack {
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  genre: string;
+  durationSec: number;
+  coverUrl: string;
+  downloadedAt: string;
+  source: string;
+  previewUrl?: string;
+  fullAudioUrl?: string;
+  youtubeVideoId?: string;
+  soundcloudPermalink?: string;
+  soundcloudTrackId?: number;
+  hasLocalBlob?: boolean;
+}
+
+export type RepeatMode = 'off' | 'all' | 'one';
+
 export interface SoundCloudArtistProfile {
   id: number;
   username: string;
@@ -47,4 +67,8 @@ export interface PersistentPlayerState {
   activeYoutubeVideoId: string | null;
   activeSoundCloudPermalink?: string | null;
   loadingFullStream: boolean;
+  queue?: GlobalSearchTrack[];
+  queueIndex?: number;
+  queueLabel?: string;
+  playNonce?: number;
 }

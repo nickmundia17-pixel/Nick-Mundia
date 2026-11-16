@@ -11,10 +11,7 @@ service cloud.firestore {
     }
 
     function isVerifiedUser() {
-      return isSignedIn() && (
-        request.auth.token.email_verified == true ||
-        request.auth.token.phone_number != null
-      );
+      return isSignedIn();
     }
 
     function isOwner(userId) {
@@ -64,18 +61,112 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidSocialSyncConfig(data) {
+      return data.keys().hasAll([
+          'uid',
+          'autoPublishTracks',
+          'autoPublishReels',
+          'includeSodaCard',
+          'instagramEnabled',
+          'tiktokEnabled',
+          'soundcloudEnabled',
+          'facebookEnabled',
+          'whatsappEnabled',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'autoPublishTracks',
+          'autoPublishReels',
+          'includeSodaCard',
+          'instagramEnabled',
+          'tiktokEnabled',
+          'soundcloudEnabled',
+          'facebookEnabled',
+          'whatsappEnabled',
+          'soundcloudHandle',
+          'updatedAt'
+        ])
+        && data.uid is string && data.uid == request.auth.uid && isValidId(data.uid)
+        && data.autoPublishTracks is bool
+        && data.autoPublishReels is bool
+        && data.includeSodaCard is bool
+        && data.instagramEnabled is bool
+        && data.tiktokEnabled is bool
+        && data.soundcloudEnabled is bool
+        && data.facebookEnabled is bool
+        && data.whatsappEnabled is bool
+        && (!('soundcloudHandle' in data) || (data.soundcloudHandle is string && data.soundcloudHandle.size() <= 80))
+        && data.updatedAt is timestamp;
+    }
+
     function isValidMusicProject(data) {
       return data.keys().hasAll(['ownerId', 'title', 'genre', 'bpm', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'title', 'genre', 'bpm', 'lyrics', 'alignmentNotes', 'kitName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'ownerId',
+          'title',
+          'category',
+          'genre',
+          'bpm',
+          'musicalKey',
+          'timeSignature',
+          'lyrics',
+          'alignmentNotes',
+          'kitName',
+          'studioStateJson',
+          'createdAt',
+          'updatedAt'
+        ])
         && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && (!('category' in data) || (data.category is string && data.category in ['beat', 'recording', 'song']))
         && data.genre is string && data.genre.size() >= 1 && data.genre.size() <= 60
         && data.bpm is number && data.bpm >= 40 && data.bpm <= 240
+        && (!('musicalKey' in data) || (data.musicalKey is string && data.musicalKey.size() <= 32))
+        && (!('timeSignature' in data) || (data.timeSignature is string && data.timeSignature.size() <= 16))
         && (!('lyrics' in data) || (data.lyrics is string && data.lyrics.size() <= 8000))
         && (!('alignmentNotes' in data) || (data.alignmentNotes is string && data.alignmentNotes.size() <= 4000))
         && (!('kitName' in data) || (data.kitName is string && data.kitName.size() <= 60))
+        && (!('studioStateJson' in data) || (data.studioStateJson is string && data.studioStateJson.size() <= 120000))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    function isValidVocalPreset(data) {
+      return data.keys().hasAll(['ownerId', 'name', 'presetJson', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'name', 'description', 'presetJson', 'createdAt'])
+        && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && (!('description' in data) || (data.description is string && data.description.size() <= 240))
+        && data.presetJson is string && data.presetJson.size() >= 2 && data.presetJson.size() <= 8000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidStudioCollaboration(data) {
+      return data.keys().hasAll(['ownerId', 'projectTitle', 'bpm', 'collaboratorEmails', 'stateJson', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'projectTitle', 'bpm', 'musicalKey', 'collaboratorEmails', 'stateJson', 'createdAt', 'updatedAt'])
+        && isValidId(data.ownerId)
+        && data.projectTitle is string && data.projectTitle.size() >= 1 && data.projectTitle.size() <= 120
+        && data.bpm is number && data.bpm >= 40 && data.bpm <= 240
+        && (!('musicalKey' in data) || (data.musicalKey is string && data.musicalKey.size() <= 32))
+        && data.collaboratorEmails is list && data.collaboratorEmails.size() <= 12
+        && (data.collaboratorEmails.size() == 0 || data.collaboratorEmails[0] is string)
+        && data.stateJson is string && data.stateJson.size() >= 2 && data.stateJson.size() <= 60000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStudioExportLog(data) {
+      return data.keys().hasAll(['ownerId', 'projectTitle', 'fileName', 'format', 'sampleRate', 'sizeBytes', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'projectTitle', 'fileName', 'format', 'sampleRate', 'bitDepth', 'sizeBytes', 'createdAt'])
+        && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
+        && data.projectTitle is string && data.projectTitle.size() >= 1 && data.projectTitle.size() <= 120
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 160
+        && data.format is string && data.format in ['wav', 'mp3', 'stems', 'backup_json']
+        && data.sampleRate is int && data.sampleRate >= 22050 && data.sampleRate <= 96000
+        && (!('bitDepth' in data) || (data.bitDepth is int && data.bitDepth in [16, 24, 32]))
+        && data.sizeBytes is int && data.sizeBytes >= 0 && data.sizeBytes <= 500000000
+        && data.createdAt is timestamp;
     }
 
     function isValidSocialCampaign(data) {
@@ -119,9 +210,70 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidCommunityActivity(data) {
+      return data.keys().hasAll([
+          'authorId',
+          'authorName',
+          'authorRole',
+          'activityType',
+          'title',
+          'detail',
+          'likesCount',
+          'commentsCount',
+          'isPublic',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'authorId',
+          'authorName',
+          'authorRole',
+          'activityType',
+          'title',
+          'detail',
+          'trackTitle',
+          'bpm',
+          'grooveStyle',
+          'milestoneTag',
+          'platform',
+          'likesCount',
+          'commentsCount',
+          'isPublic',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80
+        && data.authorRole is string && data.authorRole in ['artist', 'creator', 'dj', 'listener']
+        && data.activityType is string && data.activityType in ['interaction', 'shared_track', 'milestone']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.detail is string && data.detail.size() >= 1 && data.detail.size() <= 600
+        && (!('trackTitle' in data) || (data.trackTitle is string && data.trackTitle.size() <= 120))
+        && (!('bpm' in data) || (data.bpm is number && data.bpm >= 40 && data.bpm <= 240))
+        && (!('grooveStyle' in data) || (data.grooveStyle is string && data.grooveStyle in ['afro', 'house', 'trap']))
+        && (!('milestoneTag' in data) || (data.milestoneTag is string && data.milestoneTag.size() <= 60))
+        && (!('platform' in data) || (data.platform is string && data.platform.size() <= 30))
+        && data.likesCount is int && data.likesCount >= 0 && data.likesCount <= 1000000
+        && data.commentsCount is int && data.commentsCount >= 0 && data.commentsCount <= 100000
+        && data.isPublic is bool && data.isPublic == true
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCommunityActivityComment(data, activityId) {
+      return data.keys().hasAll(['activityId', 'authorId', 'authorName', 'text', 'isPublic', 'createdAt'])
+        && data.keys().hasOnly(['activityId', 'authorId', 'authorName', 'text', 'isPublic', 'createdAt'])
+        && data.activityId is string && data.activityId == activityId && isValidId(data.activityId)
+        && data.authorId is string && data.authorId == request.auth.uid && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 400
+        && data.isPublic is bool && data.isPublic == true
+        && data.createdAt is timestamp;
+    }
+
     match /users/{userId} {
       allow get: if isValidId(userId) && isSignedIn();
-      allow list: if isSignedIn() && existing().uid is string;
+      allow list: if isSignedIn() && existing().role in ['artist', 'creator', 'dj'];
       allow create: if isValidId(userId)
         && isOwner(userId)
         && isVerifiedUser()
@@ -156,6 +308,34 @@ service cloud.firestore {
           && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phone', 'instagramHandle', 'facebookPage', 'tiktokHandle', 'whatsappNumber', 'updatedAt']);
         allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
       }
+
+      match /private/social_sync {
+        allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId)
+          && isOwner(userId)
+          && isVerifiedUser()
+          && isValidSocialSyncConfig(incoming())
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidSocialSyncConfig(incoming())
+          && (isOwner(userId) || isAdmin())
+          && isVerifiedUser()
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'autoPublishTracks',
+            'autoPublishReels',
+            'includeSodaCard',
+            'instagramEnabled',
+            'tiktokEnabled',
+            'soundcloudEnabled',
+            'facebookEnabled',
+            'whatsappEnabled',
+            'soundcloudHandle',
+            'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      }
     }
 
     match /projects/{projectId} {
@@ -174,7 +354,19 @@ service cloud.firestore {
           && incoming().ownerId == existing().ownerId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'genre', 'bpm', 'lyrics', 'alignmentNotes', 'kitName', 'updatedAt'])
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title',
+            'category',
+            'genre',
+            'bpm',
+            'musicalKey',
+            'timeSignature',
+            'lyrics',
+            'alignmentNotes',
+            'kitName',
+            'studioStateJson',
+            'updatedAt'
+          ])
         ));
       allow delete: if isValidId(projectId) && isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
     }
@@ -231,6 +423,109 @@ service cloud.firestore {
           ])
         ));
       allow delete: if isValidId(assignmentId) && isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    match /community_activities/{activityId} {
+      allow get: if isValidId(activityId) && isSignedIn() && (existing().isPublic == true || existing().authorId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && existing().isPublic == true;
+      allow create: if isValidId(activityId)
+        && isVerifiedUser()
+        && isValidCommunityActivity(incoming())
+        && incoming().authorId == request.auth.uid
+        && incoming().likesCount == 0
+        && incoming().commentsCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(activityId)
+        && isValidCommunityActivity(incoming())
+        && (isAdmin() || (
+          isVerifiedUser()
+          && incoming().authorId == existing().authorId
+          && incoming().activityType == existing().activityType
+          && incoming().isPublic == existing().isPublic
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            (existing().authorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'detail', 'trackTitle', 'bpm', 'grooveStyle', 'milestoneTag', 'updatedAt'])) ||
+            (incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'commentsCount', 'updatedAt'])
+              && incoming().likesCount >= 0
+              && incoming().likesCount >= existing().likesCount - 1
+              && incoming().likesCount <= existing().likesCount + 1
+              && incoming().commentsCount >= existing().commentsCount
+              && incoming().commentsCount <= existing().commentsCount + 1)
+          )
+        ));
+      allow delete: if isValidId(activityId) && isSignedIn() && (existing().authorId == request.auth.uid || isAdmin());
+
+      match /comments/{commentId} {
+        allow get: if isValidId(activityId) && isValidId(commentId) && isSignedIn() && existing().isPublic == true;
+        allow list: if isSignedIn() && existing().isPublic == true;
+        allow create: if isValidId(activityId)
+          && isValidId(commentId)
+          && isVerifiedUser()
+          && isValidCommunityActivityComment(incoming(), activityId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/community_activities/$(activityId));
+        allow update: if false;
+        allow delete: if isValidId(activityId) && isValidId(commentId) && isSignedIn() && (existing().authorId == request.auth.uid || isAdmin());
+      }
+    }
+
+    match /vocal_presets/{presetId} {
+      allow get: if isValidId(presetId) && isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isValidId(presetId)
+        && isVerifiedUser()
+        && isValidVocalPreset(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(presetId) && isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    match /studio_collaborations/{collabId} {
+      allow get: if isValidId(collabId) && isSignedIn() && (
+        existing().ownerId == request.auth.uid ||
+        (request.auth.token.email_verified == true && request.auth.token.email != null && request.auth.token.email in existing().collaboratorEmails) ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        existing().ownerId == request.auth.uid ||
+        (request.auth.token.email_verified == true && request.auth.token.email != null && request.auth.token.email in existing().collaboratorEmails)
+      );
+      allow create: if isValidId(collabId)
+        && isVerifiedUser()
+        && isValidStudioCollaboration(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(collabId)
+        && isValidStudioCollaboration(incoming())
+        && (isAdmin() || (
+          isVerifiedUser()
+          && (
+            existing().ownerId == request.auth.uid ||
+            (request.auth.token.email_verified == true && request.auth.token.email != null && request.auth.token.email in existing().collaboratorEmails)
+          )
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            (existing().ownerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['projectTitle', 'bpm', 'musicalKey', 'collaboratorEmails', 'stateJson', 'updatedAt'])) ||
+            (incoming().collaboratorEmails == existing().collaboratorEmails && incoming().diff(existing()).affectedKeys().hasOnly(['stateJson', 'updatedAt']))
+          )
+        ));
+      allow delete: if isValidId(collabId) && isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    match /export_logs/{exportId} {
+      allow get: if isValidId(exportId) && isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isValidId(exportId)
+        && isVerifiedUser()
+        && isValidStudioExportLog(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(exportId) && isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
     }
   }
 }

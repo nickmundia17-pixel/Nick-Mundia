@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Play,
   Pause,
+  SkipBack,
+  SkipForward,
+  Shuffle,
+  Repeat,
+  Repeat1,
+  ListMusic,
   Volume2,
   VolumeX,
   X,
@@ -14,13 +20,21 @@ import {
   Loader2,
 } from 'lucide-react';
 import { attachMediaElementToAnalyser } from '../audio/studioAudio';
-import { type PersistentPlayerState } from '../types/discoverPlayer';
+import { type PersistentPlayerState, type RepeatMode } from '../types/discoverPlayer';
 
 interface PersistentAudioPlayerProps {
   playerState: PersistentPlayerState | null;
   activeTab: string;
+  repeatMode: RepeatMode;
+  shuffleOn: boolean;
   onSwitchMode: (mode: 'preview' | 'full') => void;
   onSelectYoutubeVersion: (videoId: string) => void;
+  onToggleRepeat: () => void;
+  onToggleShuffle: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onEnded: () => void;
+  onSelectQueueIndex?: (index: number) => void;
   onOpenDiscover: () => void;
   onClose: () => void;
   onTimeUpdate?: (currentTime: number, duration: number, isPlaying: boolean) => void;
@@ -37,15 +51,26 @@ function formatSec(sec: number): string {
 export function PersistentAudioPlayer({
   playerState,
   activeTab,
+  repeatMode,
+  shuffleOn,
   onSwitchMode,
   onSelectYoutubeVersion,
+  onToggleRepeat,
+  onToggleShuffle,
+  onPrevious,
+  onNext,
+  onEnded,
+  onSelectQueueIndex,
   onOpenDiscover,
   onClose,
   onTimeUpdate,
 }: PersistentAudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioNextRef = useRef<HTMLAudioElement | null>(null);
   const ytIframeRef = useRef<HTMLIFrameElement | null>(null);
   const scIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -53,12 +78,41 @@ export function PersistentAudioPlayer({
   const [volume, setVolume] = useState(0.85);
   const [muted, setMuted] = useState(false);
   const [videoExpanded, setVideoExpanded] = useState(false);
+  const [queueExpanded, setQueueExpanded] = useState(false);
+  const [crossfading, setCrossfading] = useState(false);
 
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [scrubTime, setScrubTime] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [pitchShift, setPitchShift] = useState(0);
   const [showPitchModal, setShowPitchModal] = useState(false);
+
+  const playNonce = playerState?.playNonce ?? 0;
+  const track = playerState?.track ?? null;
+  const mode = playerState?.mode ?? 'preview';
+  const activeYoutubeVideoId = playerState?.activeYoutubeVideoId ?? null;
+  const activeSoundCloudPermalink = playerState?.activeSoundCloudPermalink ?? null;
+  const youtubeVersions = playerState?.youtubeVersions ?? [];
+  const loadingFullStream = playerState?.loadingFullStream ?? false;
+  const queue = playerState?.queue ?? [];
+  const queueIndex = playerState?.queueIndex ?? 0;
+  const queueLabel = playerState?.queueLabel;
+
+  const instanceKey = `${track?.id ?? ''}::${playNonce}::${mode}`;
+  const firedEndedKeyRef = useRef<string | null>(null);
+  const instanceKeyRef = useRef(instanceKey);
+  instanceKeyRef.current = instanceKey;
+
+  const triggerEndedOnce = useCallback(() => {
+    const key = instanceKeyRef.current;
+    if (!key || firedEndedKeyRef.current === key) return;
+    firedEndedKeyRef.current = key;
+    onEndedRef.current();
+  }, []);
+
+  useEffect(() => {
+    firedEndedKeyRef.current = null;
+  }, [instanceKey]);
 
   useEffect(() => {
     const el = audioRef.current;
@@ -74,13 +128,6 @@ export function PersistentAudioPlayer({
       onTimeUpdate(isScrubbing ? scrubTime : currentTime, duration, isPlaying);
     }
   }, [currentTime, duration, isPlaying, isScrubbing, scrubTime, onTimeUpdate]);
-
-  const track = playerState?.track ?? null;
-  const mode = playerState?.mode ?? 'preview';
-  const activeYoutubeVideoId = playerState?.activeYoutubeVideoId ?? null;
-  const activeSoundCloudPermalink = playerState?.activeSoundCloudPermalink ?? null;
-  const youtubeVersions = playerState?.youtubeVersions ?? [];
-  const loadingFullStream = playerState?.loadingFullStream ?? false;
 
   const isSoundCloudWidgetMode = Boolean(
     track && mode === 'full' && !track.fullAudioUrl && activeSoundCloudPermalink
@@ -114,13 +161,14 @@ export function PersistentAudioPlayer({
     );
   }, []);
 
-  // Load & play native HTML5 <audio> when in Preview, Audius Full Audio, or Catalog WAV mode
+  // Load & play native HTML5 <audio> with seamless crossfade when approaching track end
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
 
     if (!track || !isNativeAudioMode) {
       el.pause();
+      if (audioNextRef.current) audioNextRef.current.pause();
       return;
     }
 
@@ -141,9 +189,22 @@ export function PersistentAudioPlayer({
     setDuration(
       mode === 'full' && track.durationSec > 0 ? track.durationSec : 30
     );
+    setCrossfading(false);
+
+    // If audioNext was running a crossfade, swap roles or reset
+    if (audioNextRef.current) {
+      audioNextRef.current.pause();
+      audioNextRef.current.currentTime = 0;
+    }
 
     if (el.src !== `${window.location.origin}${resolvedSrc}` && el.src !== resolvedSrc) {
       el.src = resolvedSrc;
+    } else {
+      try {
+        el.currentTime = 0;
+      } catch {
+        // ignore seek error before metadata
+      }
     }
 
     el.volume = muted ? 0 : volume;
@@ -163,7 +224,7 @@ export function PersistentAudioPlayer({
           setIsPlaying(false);
         }
       });
-  }, [track?.id, track?.previewUrl, track?.fullAudioUrl, track?.source, mode, isNativeAudioMode]);
+  }, [track?.id, track?.previewUrl, track?.fullAudioUrl, track?.source, mode, isNativeAudioMode, playNonce]);
 
   // Keep native audio, YouTube & SoundCloud volume/mute synced
   useEffect(() => {
@@ -189,6 +250,22 @@ export function PersistentAudioPlayer({
     sendScCommand,
   ]);
 
+  // Replay YouTube or SoundCloud stream from 0 when playNonce increments on same track (Repeat One)
+  useEffect(() => {
+    if (!playNonce) return;
+    if (isYoutubeFullMode && activeYoutubeVideoId) {
+      setCurrentTime(0);
+      sendYtCommand('seekTo', [0, true]);
+      sendYtCommand('playVideo');
+      setIsPlaying(true);
+    } else if (isSoundCloudWidgetMode && activeSoundCloudPermalink) {
+      setCurrentTime(0);
+      sendScCommand('seekTo', 0);
+      sendScCommand('play');
+      setIsPlaying(true);
+    }
+  }, [playNonce, isYoutubeFullMode, activeYoutubeVideoId, isSoundCloudWidgetMode, activeSoundCloudPermalink, sendYtCommand, sendScCommand]);
+
   // Listen to SoundCloud Widget postMessage events
   useEffect(() => {
     if (!isSoundCloudWidgetMode || !activeSoundCloudPermalink) return;
@@ -212,8 +289,11 @@ export function PersistentAudioPlayer({
           setDuration(msg.value / 1000);
         } else if (msg.method === 'play') {
           setIsPlaying(true);
-        } else if (msg.method === 'pause' || msg.method === 'finish') {
+        } else if (msg.method === 'pause') {
           setIsPlaying(false);
+        } else if (msg.method === 'finish') {
+          setIsPlaying(false);
+          triggerEndedOnce();
         }
       } catch {
         // ignore non-JSON widget messages
@@ -222,7 +302,7 @@ export function PersistentAudioPlayer({
 
     window.addEventListener('message', onScMessage);
     return () => window.removeEventListener('message', onScMessage);
-  }, [isSoundCloudWidgetMode, activeSoundCloudPermalink, track?.durationSec, isScrubbing]);
+  }, [isSoundCloudWidgetMode, activeSoundCloudPermalink, track?.durationSec, isScrubbing, triggerEndedOnce]);
 
   // Listen to YouTube IFrame API postMessage events for real-time timecode, duration & play state
   useEffect(() => {
@@ -258,9 +338,13 @@ export function PersistentAudioPlayer({
             setDuration(parsed.info.duration);
           }
           if (typeof parsed.info.playerState === 'number') {
-            if (parsed.info.playerState === 1) setIsPlaying(true);
-            else if (parsed.info.playerState === 2 || parsed.info.playerState === 0) {
+            if (parsed.info.playerState === 1) {
+              setIsPlaying(true);
+            } else if (parsed.info.playerState === 2) {
               setIsPlaying(false);
+            } else if (parsed.info.playerState === 0) {
+              setIsPlaying(false);
+              triggerEndedOnce();
             }
           }
         }
@@ -271,7 +355,7 @@ export function PersistentAudioPlayer({
 
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [isYoutubeFullMode, activeYoutubeVideoId, track?.durationSec, isScrubbing]);
+  }, [isYoutubeFullMode, activeYoutubeVideoId, track?.durationSec, isScrubbing, triggerEndedOnce]);
 
   const handleTogglePlayPause = () => {
     if (!track) return;
@@ -332,6 +416,23 @@ export function PersistentAudioPlayer({
   const displayedTime = isScrubbing ? scrubTime : currentTime;
   const maxDuration = Math.max(1, duration);
   const canSwitchPreview = Boolean(track.previewUrl || track.fullAudioUrl);
+  const hasQueue = queue.length > 1;
+  const nextTrack =
+    queue.length > 1 && queueIndex + 1 < queue.length
+      ? queue[queueIndex + 1]
+      : repeatMode === 'all' && queue.length > 1
+      ? queue[0]
+      : null;
+  const canGoNext =
+    queue.length > 1 && (shuffleOn || repeatMode !== 'off' || queueIndex + 1 < queue.length);
+
+  const handlePreviousClick = () => {
+    if (displayedTime > 3 || (!hasQueue && repeatMode !== 'all')) {
+      commitSeek(0);
+      return;
+    }
+    onPrevious();
+  };
 
   return (
     <>
@@ -339,7 +440,40 @@ export function PersistentAudioPlayer({
         ref={audioRef}
         crossOrigin="anonymous"
         onTimeUpdate={(e) => {
-          if (!isScrubbing) setCurrentTime(e.currentTarget.currentTime);
+          const el = e.currentTarget;
+          const dur = el.duration;
+          const cur = el.currentTime;
+          if (!isScrubbing) setCurrentTime(cur);
+
+          // Trigger crossfade 4 seconds before track end if queue has next track
+          const hasQueueNext = queue.length > 1 && (queueIndex + 1 < queue.length || repeatMode === 'all');
+          if (
+            isNativeAudioMode &&
+            hasQueueNext &&
+            !crossfading &&
+            dur > 6 &&
+            cur >= dur - 4 &&
+            dur - cur > 0.2
+          ) {
+            setCrossfading(true);
+            // Fade out current audio element over 3.5 seconds
+            const startVol = muted ? 0 : volume;
+            const steps = 20;
+            const stepMs = 175;
+            let currentStep = 0;
+            const fadeInterval = window.setInterval(() => {
+              currentStep++;
+              const ratio = 1 - currentStep / steps;
+              if (audioRef.current) {
+                audioRef.current.volume = Math.max(0, startVol * ratio);
+              }
+              if (currentStep >= steps) {
+                window.clearInterval(fadeInterval);
+                if (audioRef.current) audioRef.current.pause();
+                triggerEndedOnce();
+              }
+            }, stepMs);
+          }
         }}
         onLoadedMetadata={(e) => {
           if (Number.isFinite(e.currentTarget.duration) && e.currentTarget.duration > 0) {
@@ -348,11 +482,78 @@ export function PersistentAudioPlayer({
         }}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
-        onEnded={() => setIsPlaying(false)}
+        onEnded={() => {
+          if (!crossfading) {
+            setIsPlaying(false);
+            triggerEndedOnce();
+          }
+        }}
+        className="hidden"
+      />
+
+      <audio
+        ref={audioNextRef}
+        crossOrigin="anonymous"
         className="hidden"
       />
 
       <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[1220px]">
+        {/* Expandable Up Next Queue Drawer (Spotify / Boomplay Style) */}
+        {queueExpanded && queue.length > 0 && (
+          <div className="mb-2 rounded-xl bg-[#13161B]/95 backdrop-blur-md border border-[#2A313E] shadow-2xl p-3 space-y-2 max-h-[260px] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-[#232833] pb-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-100">
+                <ListMusic className="w-4 h-4 text-amber-400" />
+                <span>{queueLabel || 'Play Queue'} ({queueIndex + 1} / {queue.length})</span>
+                {shuffleOn && (
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono">
+                    SHUFFLE
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setQueueExpanded(false)}
+                className="text-xs text-slate-400 hover:text-slate-100 flex items-center gap-1"
+              >
+                <span>Close</span>
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="space-y-1">
+              {queue.map((qTrack, idx) => {
+                const isCurrent = idx === queueIndex;
+                const isNext = !isCurrent && nextTrack?.id === qTrack.id && idx === (queueIndex + 1) % queue.length;
+                return (
+                  <button
+                    key={`${qTrack.id}_${idx}`}
+                    type="button"
+                    onClick={() => onSelectQueueIndex?.(idx)}
+                    className={`w-full text-left px-2.5 py-1.5 rounded-lg border flex items-center justify-between gap-3 transition-colors ${
+                      isCurrent
+                        ? 'bg-[#1B2028] border-amber-500/50 text-amber-300'
+                        : 'bg-[#0B0D10] border-[#232833] text-slate-300 hover:border-amber-500/30 hover:text-slate-100'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="font-mono text-[10px] text-slate-500 w-5 shrink-0 tabular-nums">
+                        {isCurrent ? '▶' : `${idx + 1}.`}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium truncate">{qTrack.title}</div>
+                        <div className="text-[11px] text-slate-400 truncate">{qTrack.artist}</div>
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                      {isCurrent ? 'NOW PLAYING' : isNext ? 'UP NEXT' : formatSec(qTrack.durationSec)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Persistent Expandable Full-Song Stream Drawer (kept mounted while in YouTube Full mode so audio never stops across tabs) */}
         {isYoutubeFullMode && activeYoutubeVideoId && (
           <div
@@ -515,31 +716,96 @@ export function PersistentAudioPlayer({
                     ? 'Full Song'
                     : '30s Preview'}
                 </span>
+                {nextTrack && (
+                  <span className="text-slate-500"> · Up Next: {nextTrack.title}</span>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Center: Play/Pause + Scrub Bar + Mode Toggle */}
-          <div className="flex-1 flex items-center gap-3 min-w-0">
-            <button
-              type="button"
-              onClick={handleTogglePlayPause}
-              disabled={loadingFullStream}
-              aria-label={isPlaying ? 'Pause floating player' : 'Play floating player'}
-              className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-95 disabled:opacity-50 ${
-                mode === 'full'
-                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                  : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-              }`}
-            >
-              {loadingFullStream ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : isPlaying ? (
-                <Pause className="w-4 h-4" />
-              ) : (
-                <Play className="w-4 h-4 ml-0.5" />
-              )}
-            </button>
+          {/* Center: Shuffle / Prev / Play / Next / Repeat + Scrub Bar + Mode Toggle */}
+          <div className="flex-1 flex items-center gap-2.5 min-w-0">
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                onClick={onToggleShuffle}
+                disabled={!hasQueue}
+                title={shuffleOn ? 'Shuffle On' : 'Shuffle Off'}
+                aria-label="Toggle shuffle"
+                className={`p-1.5 rounded-full transition-colors disabled:opacity-30 ${
+                  shuffleOn
+                    ? 'text-emerald-400 bg-emerald-500/15'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-[#1B2028]'
+                }`}
+              >
+                <Shuffle className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePreviousClick}
+                title="Previous track (or restart if > 3s)"
+                aria-label="Previous track"
+                className="p-1.5 rounded-full text-slate-300 hover:text-white hover:bg-[#1B2028] transition-colors"
+              >
+                <SkipBack className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTogglePlayPause}
+                disabled={loadingFullStream}
+                aria-label={isPlaying ? 'Pause floating player' : 'Play floating player'}
+                className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-95 disabled:opacity-50 ${
+                  mode === 'full'
+                    ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                    : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                }`}
+              >
+                {loadingFullStream ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : isPlaying ? (
+                  <Pause className="w-4 h-4" />
+                ) : (
+                  <Play className="w-4 h-4 ml-0.5" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={onNext}
+                disabled={!canGoNext}
+                title="Next song in queue"
+                aria-label="Next track"
+                className="p-1.5 rounded-full text-slate-300 hover:text-white hover:bg-[#1B2028] transition-colors disabled:opacity-30"
+              >
+                <SkipForward className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={onToggleRepeat}
+                title={
+                  repeatMode === 'one'
+                    ? 'Repeat Current Song (On)'
+                    : repeatMode === 'all'
+                    ? 'Repeat Queue (All)'
+                    : 'Repeat Off'
+                }
+                aria-label={`Repeat mode: ${repeatMode}`}
+                className={`p-1.5 rounded-full transition-colors ${
+                  repeatMode !== 'off'
+                    ? 'text-amber-400 bg-amber-500/15'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-[#1B2028]'
+                }`}
+              >
+                {repeatMode === 'one' ? (
+                  <Repeat1 className="w-3.5 h-3.5" />
+                ) : (
+                  <Repeat className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
 
             <div className="flex-1 flex items-center gap-2.5 min-w-0">
               <span className="font-mono text-[11px] text-slate-400 tabular-nums w-10 text-right shrink-0">
@@ -715,6 +981,22 @@ export function PersistentAudioPlayer({
                 </div>
               )}
             </div>
+
+            {queue.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setQueueExpanded((v) => !v)}
+                className={`px-2 py-1.5 rounded-lg border text-[11px] font-mono flex items-center gap-1 transition-colors ${
+                  queueExpanded
+                    ? 'bg-[#1B2028] border-amber-500/50 text-amber-300'
+                    : 'bg-[#0B0D10] border-[#232833] text-slate-300 hover:text-white'
+                }`}
+                title="View Up Next queue"
+              >
+                <ListMusic className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">{queueIndex + 1}/{queue.length}</span>
+              </button>
+            )}
 
             {((isYoutubeFullMode && activeYoutubeVideoId) ||
               (isSoundCloudWidgetMode && activeSoundCloudPermalink)) && (
